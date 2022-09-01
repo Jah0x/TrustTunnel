@@ -1,6 +1,6 @@
 use std::io;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -58,7 +58,7 @@ struct Stream {
 
 struct StreamSource {
     request: RequestHeaders,
-    client_address: SocketAddr,
+    client_address: IpAddr,
     /// Receives messages from [`Http1Codec.upload_tx`]
     upload_rx: mpsc::Receiver<Option<Bytes>>,
     id: log_utils::IdChain<u64>,
@@ -138,7 +138,7 @@ impl<IO> Http1Codec<IO>
                 Ok(RequestStatus::Complete(Box::new(Stream {
                     source: StreamSource {
                         request,
-                        client_address: self.transport_stream.peer_addr()?,
+                        client_address: self.transport_stream.peer_addr()?.ip(),
                         upload_rx: self.upload_rx.take().unwrap(),
                         id: id.clone(),
                     },
@@ -244,7 +244,7 @@ impl http_codec::PendingRequest for StreamSource {
         &self.request
     }
 
-    fn client_address(&self) -> io::Result<SocketAddr> {
+    fn client_address(&self) -> io::Result<IpAddr> {
         Ok(self.client_address)
     }
 

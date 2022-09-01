@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -307,8 +307,8 @@ impl http_codec::PendingRequest for StreamSource {
         &self.request
     }
 
-    fn client_address(&self) -> io::Result<SocketAddr> {
-        self.socket.peer_addr()
+    fn client_address(&self) -> io::Result<IpAddr> {
+        self.socket.peer_addr().map(|x| x.ip())
     }
 
     fn finalize(self: Box<Self>) -> Box<dyn pipe::Source> {

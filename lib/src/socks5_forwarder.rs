@@ -1,42 +1,27 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, LinkedList};
 use std::io;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::BytesMut;
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use crate::forwarder::Forwarder;
-use crate::{authentication, core, datagram_pipe, downstream, forwarder, log_id, log_utils, net_utils, pipe};
+use crate::{authentication, core, datagram_pipe, downstream, forwarder, log_id, log_utils, net_utils, pipe, socks5_client, tunnel};
 use crate::settings::{ForwardProtocolSettings, Settings, Socks5ForwarderSettings};
 use crate::tcp_forwarder::TcpForwarder;
-
-
-/// This user name prefix is used as a marker for SNI-based authentication procedure.
-/// In this case we only have mixed credentials and cannot separate the user
-/// name from them.
-const SNI_AUTHENTICATION_USER_NAME_PREFIX: &str = "sni";
-const USERNAME_PARTS_DELIMITER: char = '@';
-const MAX_USERNAME_LENGTH: usize = u8::MAX as usize;
 
 
 pub(crate) struct Socks5Forwarder {
     context: Arc<core::Context>,
 }
 
-struct Auth {
-    username: String,
-    password: String,
-}
-
 struct TcpConnector {
     core_settings: Arc<Settings>,
-    destination: net_utils::TcpDestination,
-    auth: Option<Auth>,
-    id: log_utils::IdChain<u64>,
 }
 
 struct DatagramSource {
@@ -55,11 +40,11 @@ struct DatagramTransceiverShared {
     /// Key is the source address received in packet from client
     associations: Mutex<HashMap<SocketAddr, UdpAssociation>>,
     new_socket_tx: mpsc::Sender<()>,
-    auth: Option<Auth>,
+    auth: Option<socks5_client::Authentication<'static>>,
     id: log_utils::IdChain<u64>,
 }
 
-type UdpAssociationSocket = async_socks5::SocksDatagram<TcpStream>;
+type UdpAssociationSocket = socks5_client::UdpAssociation<TcpStream>;
 
 struct UdpAssociation {
     socket: Arc<UdpAssociationSocket>,
@@ -69,6 +54,10 @@ struct UdpAssociation {
 struct SocketError {
     source: SocketAddr,
     io: io::Error,
+}
+
+struct DatagramMuxAuthenticator {
+    core_settings: Arc<Settings>,
 }
 
 
@@ -90,18 +79,25 @@ impl forwarder::UdpDatagramPipeShared for DatagramTransceiverShared {
             return Ok(());
         }
 
-        let server_address = &socks_settings(&self.core_settings).address;
-        let socket = Arc::new(
-            async_socks5::SocksDatagram::associate(
-                TcpStream::connect(server_address).await?,
-                UdpSocket::from_std(net_utils::make_udp_socket(server_address.is_ipv4())?)?,
-                self.auth.as_ref().map(|x| async_socks5::Auth {
-                    username: x.username.clone(),
-                    password: x.password.clone(),
-                }),
-                None::<async_socks5::AddrKind>,
-            ).await.map_err(socks_to_io_error)?
-        );
+        let socket = match socks5_client::connect(
+            TcpStream::connect(socks_settings(&self.core_settings).address).await?,
+            self.auth.clone(),
+            socks5_client::Request::UdpAssociate,
+        ).await {
+            Ok(socks5_client::ConnectResult::TcpConnection(_)) => unreachable!(),
+            Ok(socks5_client::ConnectResult::UdpAssociation(x)) => Arc::new(x),
+            Ok(socks5_client::ConnectResult::Failure(x)) => return Err(io::Error::new(
+                ErrorKind::Other, format!("SOCKS server replied with error code: {:?}", x)
+            )),
+            Err(socks5_client::Error::Io(x)) => return Err(x),
+            Err(socks5_client::Error::Protocol(x)) => return Err(io::Error::new(
+                ErrorKind::Other, format!("SOCKS protocol error: {}", x)
+            )),
+            Err(socks5_client::Error::Authentication(x)) => {
+                self.associations.lock().unwrap().clear();
+                return Err(io::Error::new(ErrorKind::Other, format!("Authentication error: {}", x)));
+            }
+        };
 
         self.associations.lock().unwrap().insert(
             meta.source,
@@ -134,30 +130,20 @@ impl forwarder::UdpDatagramPipeShared for DatagramTransceiverShared {
 }
 
 impl Forwarder for Socks5Forwarder {
-    fn tcp_connector(
-        &mut self,
-        id: log_utils::IdChain<u64>,
-        meta: forwarder::TcpConnectionMeta,
-    ) -> io::Result<Box<dyn forwarder::TcpConnector>> {
-        Ok(Box::new(TcpConnector {
+    fn tcp_connector(&self) -> Box<dyn forwarder::TcpConnector> {
+        Box::new(TcpConnector {
             core_settings: self.context.settings.clone(),
-            destination: meta.destination,
-            auth: meta.auth
-                .map(|x|
-                    if socks_settings(&self.context.settings).extended_auth {
-                        make_extended_auth(x, &meta.client_address, meta.client_platform, meta.app_name)
-                    } else {
-                        make_auth(x)
-                    }
-                )
-                .transpose()
-                .map_err(|x| io::Error::new(ErrorKind::Other, x))?,
-            id,
-        }))
+        })
+    }
+
+    fn datagram_mux_authenticator(&self) -> Box<dyn forwarder::DatagramMultiplexerAuthenticator> {
+        Box::new(DatagramMuxAuthenticator {
+            core_settings: self.context.settings.clone(),
+        })
     }
 
     fn make_udp_datagram_multiplexer(
-        &mut self,
+        &self,
         id: log_utils::IdChain<u64>,
         meta: forwarder::UdpMultiplexerMeta,
     ) -> io::Result<(
@@ -173,7 +159,12 @@ impl Forwarder for Socks5Forwarder {
             auth: meta.auth
                 .map(|x|
                     if socks_settings(&self.context.settings).extended_auth {
-                        make_extended_auth(x, &meta.client_address, meta.client_platform, None)
+                        make_extended_auth(
+                            x,
+                            &meta.tls_domain,
+                            &meta.client_address,
+                            meta.user_agent.as_ref().map(|x| x.as_ref()),
+                        ).map(socks5_client::Authentication::into_owned)
                     } else {
                         make_auth(x)
                     }
@@ -197,7 +188,7 @@ impl Forwarder for Socks5Forwarder {
         ))
     }
 
-    fn make_icmp_datagram_multiplexer(&mut self, id: log_utils::IdChain<u64>)
+    fn make_icmp_datagram_multiplexer(&self, id: log_utils::IdChain<u64>)
         -> io::Result<(
             Box<dyn datagram_pipe::Source<Output = forwarder::IcmpDatagram>>,
             Box<dyn datagram_pipe::Sink<Input = downstream::IcmpDatagram>>,
@@ -209,18 +200,99 @@ impl Forwarder for Socks5Forwarder {
 
 #[async_trait]
 impl forwarder::TcpConnector for TcpConnector {
-    async fn connect(self: Box<Self>) -> io::Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>)> {
-        let mut stream = TcpStream::connect(socks_settings(&self.core_settings).address).await?;
-        async_socks5::connect(
-            &mut stream,
-            self.destination,
-            self.auth.map(|x| async_socks5::Auth {
-                username: x.username,
-                password: x.password,
-            }),
-        ).await
-            .map_err(socks_to_io_error)?;
-        Ok(TcpForwarder::pipe_from_stream(stream, self.id))
+    async fn connect(
+        self: Box<Self>,
+        id: log_utils::IdChain<u64>,
+        meta: forwarder::TcpConnectionMeta,
+    ) -> Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>), tunnel::ConnectionError> {
+        let (destination, port) = match &meta.destination {
+            net_utils::TcpDestination::Address(x) =>
+                (socks5_client::Address::IpAddress(x.ip()), x.port()),
+            net_utils::TcpDestination::HostName(x) =>
+                (socks5_client::Address::DomainName(Cow::Borrowed(&x.0)), x.1),
+        };
+
+        let stream = match TcpStream::connect(socks_settings(&self.core_settings).address).await {
+            Ok(s) => s,
+            Err(e) => return Err(tunnel::ConnectionError::Io(io::Error::new(
+                ErrorKind::Other, format!("Failed to connect to proxy server: {}", e)
+            ))),
+        };
+
+        match socks5_client::connect(
+            stream,
+            meta.auth
+                .map(|x|
+                    if socks_settings(&self.core_settings).extended_auth {
+                        make_extended_auth(
+                            x,
+                            &meta.tls_domain,
+                            &meta.client_address,
+                            meta.user_agent.as_ref().map(|x| x.as_ref()),
+                        )
+                    } else {
+                        make_auth(x)
+                    }
+                )
+                .transpose()
+                .map_err(|x| tunnel::ConnectionError::Other(x))?,
+            socks5_client::Request::Connect(destination, port),
+        ).await {
+            Ok(socks5_client::ConnectResult::TcpConnection(stream)) =>
+                Ok(TcpForwarder::pipe_from_stream(stream, id)),
+            Ok(socks5_client::ConnectResult::UdpAssociation(_)) => unreachable!(),
+            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::HostUnreachable)) =>
+                Err(tunnel::ConnectionError::HostUnreachable),
+            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::NetworkUnreachable)) =>
+                Err(tunnel::ConnectionError::HostUnreachable),
+            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::ConnectionRefused)) =>
+                Err(tunnel::ConnectionError::Io(ErrorKind::ConnectionRefused.into())),
+            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::TtlExpired)) =>
+                Err(tunnel::ConnectionError::Timeout),
+            Ok(socks5_client::ConnectResult::Failure(x)) => Err(tunnel::ConnectionError::Other(
+                format!("SOCKS server replied with error code: {:?}", x)
+            )),
+            Err(socks5_client::Error::Io(x)) => Err(tunnel::ConnectionError::Io(io::Error::new(
+                ErrorKind::Other, format!("Proxy connection error: {}", x)
+            ))),
+            Err(socks5_client::Error::Protocol(x)) => Err(tunnel::ConnectionError::Other(
+                format!("SOCKS protocol error: {}", x)
+            )),
+            Err(socks5_client::Error::Authentication(x)) => Err(tunnel::ConnectionError::Authentication(x)),
+        }
+    }
+}
+
+#[async_trait]
+impl forwarder::DatagramMultiplexerAuthenticator for DatagramMuxAuthenticator {
+    async fn check_auth(
+        self: Box<Self>,
+        client_address: IpAddr,
+        tls_domain: &'_ str,
+        auth: authentication::Source<'_>,
+        user_agent: Option<&'_ str>,
+    ) -> Result<(), tunnel::ConnectionError> {
+        match socks5_client::connect(
+            TcpStream::connect(socks_settings(&self.core_settings).address).await
+                .map_err(tunnel::ConnectionError::Io)?,
+            Some(if socks_settings(&self.core_settings).extended_auth {
+                make_extended_auth(auth, tls_domain, &client_address, user_agent)
+            } else {
+                make_auth(auth)
+            }.map_err(|x| tunnel::ConnectionError::Io(io::Error::new(ErrorKind::Other, x)))?),
+            socks5_client::Request::UdpAssociate,
+        ).await {
+            Ok(socks5_client::ConnectResult::TcpConnection(_)) => unreachable!(),
+            Ok(socks5_client::ConnectResult::UdpAssociation(_)) => Ok(()),
+            Ok(socks5_client::ConnectResult::Failure(x)) => Err(tunnel::ConnectionError::Other(
+                format!("SOCKS server replied with error code: {:?}", x)
+            )),
+            Err(socks5_client::Error::Io(x)) => Err(tunnel::ConnectionError::Io(x)),
+            Err(socks5_client::Error::Protocol(x)) => Err(tunnel::ConnectionError::Other(
+                format!("SOCKS protocol error: {}", x)
+            )),
+            Err(socks5_client::Error::Authentication(x)) => Err(tunnel::ConnectionError::Authentication(x)),
+        }
     }
 }
 
@@ -242,7 +314,7 @@ impl DatagramSource {
 
         Ok(Some(forwarder::UdpDatagramReadStatus::Read(forwarder::UdpDatagram {
             meta: forwarder::UdpDatagramMeta {
-                source: socks_to_socket_addr(&peer)?,
+                source: peer,
                 destination: *source,
             },
             payload: buffer.freeze(),
@@ -369,24 +441,12 @@ impl datagram_pipe::Sink for DatagramSink {
     }
 }
 
-impl Into<async_socks5::AddrKind> for net_utils::TcpDestination {
-    fn into(self) -> async_socks5::AddrKind {
-        match self {
-            net_utils::TcpDestination::Address(x) => async_socks5::AddrKind::Ip(x),
-            net_utils::TcpDestination::HostName(x) => async_socks5::AddrKind::Domain(x.0, x.1),
-        }
-    }
-}
-
-fn make_auth(auth: authentication::Source<'_>) -> Result<Auth, String> {
+fn make_auth(auth: authentication::Source) -> Result<socks5_client::Authentication, String> {
     Ok(match auth {
-        authentication::Source::Sni(x) => Auth {
-            username: format!(
-                "{}{USERNAME_PARTS_DELIMITER}{}",
-                SNI_AUTHENTICATION_USER_NAME_PREFIX,
-                x.chars().take(6).collect::<String>(),
-            ),
-            password: x.into_owned(),
+        authentication::Source::Sni(x) => {
+            socks5_client::Authentication::UsernamePassword(
+                x.clone(), x
+            )
         },
         authentication::Source::ProxyBasic(x) => {
             let credentials = base64::decode(x.as_ref())
@@ -394,33 +454,43 @@ fn make_auth(auth: authentication::Source<'_>) -> Result<Auth, String> {
                 .and_then(|x| String::from_utf8(x).map_err(|e| e.to_string()))?;
             let mut split = credentials.splitn(2, ':');
 
-            Auth {
-                username: String::from(split.next().unwrap()),
-                password: split.next().map(String::from)
-                    .ok_or_else(|| "Expected colon-separated credentials".to_string())?,
-            }
+            socks5_client::Authentication::UsernamePassword(
+                Cow::Owned(String::from(split.next().unwrap())),
+                Cow::Owned(
+                    split.next()
+                        .map(String::from)
+                        .ok_or_else(|| "Expected colon-separated credentials".to_string())?
+                ),
+            )
         },
     })
 }
 
-fn make_extended_auth(
-    auth: authentication::Source<'_>,
-    client_address: &SocketAddr,
-    client_platform: Option<String>,
-    app_name: Option<String>,
-) -> Result<Auth, String> {
-    let mut auth = make_auth(auth)?;
-    auth.username = format!(
-        "{}{USERNAME_PARTS_DELIMITER}{}{USERNAME_PARTS_DELIMITER}{}{USERNAME_PARTS_DELIMITER}{}",
-        auth.username,
-        client_address,
-        client_platform.unwrap_or_default(),
-        app_name.unwrap_or_default(),
-    );
+fn make_extended_auth<'a>(
+    auth: authentication::Source<'a>,
+    tls_domain: &'a str,
+    client_address: &IpAddr,
+    user_agent: Option<&'a str>,
+) -> Result<socks5_client::Authentication<'a>, String> {
+    let mut values = vec![
+        socks5_client::ExtendedAuthenticationValue::Domain(Cow::Borrowed(tls_domain)),
+        socks5_client::ExtendedAuthenticationValue::ClientAddress(*client_address),
+    ];
 
-    auth.username.truncate(MAX_USERNAME_LENGTH);
+    if let Some(user_agent) = user_agent {
+        values.push(
+            socks5_client::ExtendedAuthenticationValue::UserAgent(Cow::Borrowed(user_agent))
+        );
+    }
 
-    Ok(auth)
+    match auth {
+        authentication::Source::Sni(_) => values.push(socks5_client::ExtendedAuthenticationValue::SniAuth),
+        authentication::Source::ProxyBasic(x) => values.push(
+            socks5_client::ExtendedAuthenticationValue::BasicProxyAuth(x)
+        ),
+    }
+
+    Ok(socks5_client::Authentication::Extended(values))
 }
 
 const fn socks_settings(settings: &Settings) -> &Socks5ForwarderSettings {
@@ -430,18 +500,14 @@ const fn socks_settings(settings: &Settings) -> &Socks5ForwarderSettings {
     }
 }
 
-fn socks_to_socket_addr(x: &async_socks5::AddrKind) -> io::Result<SocketAddr> {
-    match x {
-        async_socks5::AddrKind::Domain(d, p) => Err(io::Error::new(
-            ErrorKind::Other, format!("Unexpected bound address: {}:{}", d, p)
-        )),
-        async_socks5::AddrKind::Ip(addr) => Ok(*addr),
-    }
-}
-
-fn socks_to_io_error(err: async_socks5::Error) -> io::Error {
+fn socks_to_io_error(err: socks5_client::Error) -> io::Error {
     match err {
-        async_socks5::Error::Io(e) => e,
-        e => io::Error::new(ErrorKind::Other, e.to_string()),
+        socks5_client::Error::Io(e) => e,
+        socks5_client::Error::Protocol(e) => io::Error::new(
+            ErrorKind::Other, format!("SOCKS protocol error: {}", e)
+        ),
+        socks5_client::Error::Authentication(e) => io::Error::new(
+            ErrorKind::Other, format!("Authentication error: {}", e)
+        ),
     }
 }

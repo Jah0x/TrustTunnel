@@ -36,3 +36,4 @@ mod icmp_forwarder;
 mod metrics;
 mod http_ping_handler;
 mod reverse_proxy;
+mod socks5_client;

@@ -126,29 +126,62 @@ the cache TTL (see `RadiusAuthenticatorSettings.cache_ttl`).
 
 ##### SOCKS5 authenticator
 
-Perform authentication according to the [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929).
+###### Standard authentication
+
+In case `Socks5ForwarderSettings.extended_auth` is set to false, the endpoint performs
+the standard authentication procedure according to the
+[RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929).
+
 Depending on the client-side authentication way, the username and password are as follows:
 * [SNI authentication](#sni-authentication):
-  * username = `sni@<hash[0..6]>@<client_address>@<client_platform>@<app_name>[@]`
-    * `<hash[0..6]>` - the first 6 characters of the SNI
-    * `<client_address>` - the address of a VPN client sent the request (e.g. `54.243.99.69:12345`)
-    * `<client_platform>` - the name of a platform of the VPN client (_may be absent_,
-      e.g, `uname@54.243.99.69:12345@@curl`)
-    * `<app_name>` - the name of an application initiated the request (_may be absent_,
-      e.g, `uname@54.243.99.69:12345@Linux@`)
-
-  * `password` = `hash` - corresponds to `hash`, as in [SNI authentication](#sni-authentication)
+  * both `username` and `password` = `hash` - corresponds to `hash`, as in 
+    [SNI authentication](#sni-authentication)
 
 * [Proxy authentication](#proxy-authentication):
-  * username = `<user_name>@<client_address>@<client_platform>@<app_name>[@]`
-    * `<user_name>` - corresponds to `token`, as in [Proxy authentication](#proxy-authentication)
-    * `<client_address>` - the address of a VPN client sent the request (e.g. `54.243.99.69:12345`)
-    * `<client_platform>` - the name of a platform of the VPN client (_may be absent_,
-      e.g, `uname@54.243.99.69:12345@@curl`)
-    * `<app_name>` - the name of an application initiated the request (_may be absent_,
-      e.g, `uname@54.243.99.69:12345@Linux@`)
+  * `username` corresponds to `token`, as in [Proxy authentication](#proxy-authentication)
+  * `password` corresponds to `credentials`, as in [Proxy authentication](#proxy-authentication)
 
-  * password corresponds to `credentials`, as in [Proxy authentication](#proxy-authentication)
+###### Extended authentication
+
+The extended authentication uses `0x80` as an authentication method.
+After a server selects this authentication method, a client sends an authentication
+request in the following format:
+```
++-----+-----------+-----+--------+
+| VER |   EXT(0)  |     | EXT(n) |
++-----+-----------+ ... +--------+
+|  1  | see below |     |        |
++-----+-----------+-----+--------+
+```
+Where:
+ * `VER` - the current extended authentication version: 0x01
+ * `EXT[i]` - an extension in the following format:
+   ```
+   +------+--------+----------+
+   | TYPE | LENGTH |   VALUE  |
+   +------+--------+----------+
+   |  1   |    2   | Variable |
+   +------+--------+----------+
+   ```
+   Where:
+    * `TYPE` - a type of the extension value (see [`ExtendedAuthenticationValue`])
+    * `LENGTH` - the length of the extension value
+    * `VALUE` - the extension value
+
+Available extensions:
+* `TERM`: type = 0x00, length = 0 - terminating extension, marks a message end
+* `DOMAIN`: type = 0x01, length = (0..MAX], value = UTF-8 string - hostname which
+  a client used for the TLS session (SNI)
+* `CLIENT_ADDRESS`: type = 0x02, length = [4|16], value = Bytes - public IP
+  address of the VPN client
+* `USER_AGENT`: type = 0x03, length = (0..MAX], value = UTF-8 string - user agent of the VPN client
+* `PROXY_AUTH`: type = 0x04, length = (0..MAX], value = base64 string - `<credentials>` part of 
+  [the Proxy-Authorization header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Proxy-Authorization)
+* `SNI_AUTH`: type = 0x05, length = 0 - marks that the VPN client tries to authenticate using SNI
+
+A message **MUST** end with the `TERM` extension.
+
+The server responds with a standard message as in [the RFC](https://datatracker.ietf.org/doc/html/rfc1929#section-2).
 
 ### Metrics collecting
 

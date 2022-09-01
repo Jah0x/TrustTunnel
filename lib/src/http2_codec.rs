@@ -1,6 +1,6 @@
 use std::io;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -19,7 +19,7 @@ pub(crate) struct Http2Codec<IO> {
     state: State<IO>,
     parent_id_chain: log_utils::IdChain<u64>,
     next_conn_id: std::ops::RangeFrom<u64>,
-    client_address: SocketAddr,
+    client_address: IpAddr,
 }
 
 enum State<IO> {
@@ -36,7 +36,7 @@ struct Stream {
 struct Request {
     request: RequestHeaders,
     rx: RecvStream,
-    client_address: SocketAddr,
+    client_address: IpAddr,
     id: log_utils::IdChain<u64>,
 }
 
@@ -72,7 +72,7 @@ impl<IO> Http2Codec<IO>
             })
             .unwrap();
 
-        let client_address = transport_stream.peer_addr()?;
+        let client_address = transport_stream.peer_addr()?.ip();
 
         Ok(Self {
             state: State::Handshake(
@@ -181,7 +181,7 @@ impl http_codec::PendingRequest for Request {
         &self.request
     }
 
-    fn client_address(&self) -> io::Result<SocketAddr> {
+    fn client_address(&self) -> io::Result<IpAddr> {
         Ok(self.client_address)
     }
 

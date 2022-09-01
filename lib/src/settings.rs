@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use serde::Deserialize;
-use crate::authentication::{Authenticator, DummyAuthenticator};
+use crate::authentication::Authenticator;
 use crate::authentication::file_based::FileBasedAuthenticator;
 use crate::authentication::radius::RadiusAuthenticator;
 
@@ -92,10 +92,13 @@ pub struct Settings {
     /// The list of listener codec settings
     #[serde(deserialize_with = "deserialize_protocols")]
     pub(crate) listen_protocols: Vec<ListenProtocolSettings>,
-    /// The client authenticator
-    #[serde(default = "Settings::default_authenticator")]
+    /// The client authenticator.
+    /// If this one is set to [`None`] and
+    /// [forward_protocol](Settings.forward_protocol) is set to [SOCKS5](ForwardProtocolSettings::Socks5),
+    /// the endpoint will try to authenticate requests using the SOCKS5 authentication protocol.
+    #[serde(default)]
     #[serde(deserialize_with = "deserialize_authenticator")]
-    pub(crate) authenticator: Arc<dyn Authenticator>,
+    pub(crate) authenticator: Option<Arc<dyn Authenticator>>,
     /// The ICMP forwarding settings.
     /// Setting up this feature requires superuser rights on some systems.
     pub(crate) icmp: Option<IcmpSettings>,
@@ -436,10 +439,6 @@ impl Settings {
         true
     }
 
-    fn default_authenticator() -> Arc<dyn Authenticator> {
-        Arc::new(DummyAuthenticator::default())
-    }
-
     fn default_tls_handshake_timeout() -> Duration {
         Duration::from_secs(10)
     }
@@ -477,7 +476,7 @@ impl Default for Settings {
                 ListenProtocolSettings::Http2(Http2Settings::builder().build()),
                 ListenProtocolSettings::Quic(QuicSettings::builder().build()),
             ],
-            authenticator: Settings::default_authenticator(),
+            authenticator: None,
             icmp: None,
             metrics: Default::default(),
             built: false,
@@ -652,7 +651,7 @@ impl SettingsBuilder {
                 udp_connections_timeout: Settings::default_udp_connections_timeout(),
                 forward_protocol: Default::default(),
                 listen_protocols: vec![],
-                authenticator: Settings::default_authenticator(),
+                authenticator: None,
                 icmp: None,
                 metrics: Default::default(),
                 built: true,
@@ -663,14 +662,10 @@ impl SettingsBuilder {
     }
 
     /// Finalize [`Settings`]
-    pub fn build(mut self) -> BuilderResult<Settings> {
+    pub fn build(self) -> BuilderResult<Settings> {
         if !self.tunnel_tls_host_info_set {
             return Err(BuilderError::TunnelTlsHostInfo("Not set".to_string()));
         }
-
-        self.settings.authenticator = Arc::from(
-            self.authenticator.ok_or_else(|| BuilderError::AuthInfo("Not set".to_string()))?
-        );
 
         self.settings.validate().map_err(BuilderError::Validation)?;
 
@@ -804,20 +799,7 @@ impl Socks5ForwarderSettingsBuilder {
     }
 
     /// Enable/disable extended authentication.
-    /// If enabled, the username during authentication will be formatted as follows:
-    ///
-    /// ```<username>@<client_address>@<client_platform>@<app_name>[@]```
-    ///
-    /// `<client_address>` - the address of a VPN client sent the request
-    /// `<client_platform>` - the name of a platform of the VPN client (_may be absent_,
-    /// e.g, `uname@54.243.99.69:7777@@curl`)
-    /// `<app_name>` - the name of an application initiated the request (_may be absent_,
-    /// e.g, `uname@54.243.99.69:7777@Linux@`)
-    ///
-    /// In case the resulting string exceeds the boundaries, it's marked as truncated
-    /// with `@` character (e.g., `uname@54.243.99.69:7777@Windows@very_long_app_name@`).
-    ///
-    /// **NOTE**: setting this to true overrides other authentication settings
+    /// See README for details.
     pub fn extended_auth(mut self, v: bool) -> Self {
         self.settings.extended_auth = v;
         self
@@ -1199,18 +1181,20 @@ fn deserialize_file_path<'de, D>(deserializer: D) -> Result<String, D::Error>
     deserializer.deserialize_str(Visitor)
 }
 
-fn deserialize_authenticator<'de, D>(deserializer: D) -> Result<Arc<dyn Authenticator>, D::Error>
+fn deserialize_authenticator<'de, D>(deserializer: D) -> Result<Option<Arc<dyn Authenticator>>, D::Error>
     where
         D: serde::de::Deserializer<'de>,
 {
     match AuthenticatorSettings::deserialize(deserializer)? {
-        AuthenticatorSettings::File(x) => Ok(Arc::new(
+        AuthenticatorSettings::File(x) => Ok(Some(Arc::new(
             FileBasedAuthenticator::new(&x.path)
                 .map_err(|e| serde::de::Error::invalid_value(
                     serde::de::Unexpected::Other(&format!("authenticator initialization error: {}", e)),
                     &"a file with valid authentication info"
                 ))?
-        )),
-        AuthenticatorSettings::Radius(x) => Ok(Arc::new(RadiusAuthenticator::new(x))),
+        ))),
+        AuthenticatorSettings::Radius(x) => Ok(Some(Arc::new(
+            RadiusAuthenticator::new(x)
+        ))),
     }
 }

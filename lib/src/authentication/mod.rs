@@ -35,30 +35,16 @@ pub trait Authenticator: Send + Sync {
     async fn authenticate(&self, source: Source<'_>, log_id: &log_utils::IdChain<u64>) -> Status;
 }
 
-/// The [`Authenticator`] implementation which always returns the same status.
-/// By default it authenticates any request.
+/// The [`Authenticator`] implementation which always delegates
+/// any authentication request to a [Forwarder](crate::forwarder::Forwarder).
 #[derive(Default)]
-pub struct DummyAuthenticator {
-    redirect_to_forwarder: bool,
-}
-
-impl DummyAuthenticator {
-    /// Make the authenticator delegate any authentication request to a forwarder
-    pub fn redirect_to_forwarder() -> Self {
-        Self {
-            redirect_to_forwarder: true,
-        }
-    }
+pub struct RedirectToForwarderAuthenticator {
 }
 
 #[async_trait]
-impl Authenticator for DummyAuthenticator {
+impl Authenticator for RedirectToForwarderAuthenticator {
     async fn authenticate(&self, source: Source<'_>, _log_id: &log_utils::IdChain<u64>) -> Status {
-        if self.redirect_to_forwarder {
-            Status::TryThroughForwarder(source.into_owned())
-        } else {
-            Status::Pass
-        }
+        Status::TryThroughForwarder(source.into_owned())
     }
 }
 

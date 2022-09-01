@@ -309,3 +309,116 @@ pub(crate) fn rfc1071_checksum(bytes: &[u8]) -> u16 {
     }
     !((sum >> 16) + sum) as u16
 }
+
+/// Returns [`true`] if the address appears to be globally routable.
+/// See [iana-ipv4-special-registry][ipv4-sr].
+///
+/// The following return [`false`]:
+///
+/// - private addresses (see [`Ipv4Addr::is_private()`])
+/// - the loopback address (see [`Ipv4Addr::is_loopback()`])
+/// - the link-local address (see [`Ipv4Addr::is_link_local()`])
+/// - the broadcast address (see [`Ipv4Addr::is_broadcast()`])
+/// - addresses used for documentation (see [`Ipv4Addr::is_documentation()`])
+/// - the unspecified address (see [`Ipv4Addr::is_unspecified()`]), and the whole
+///   `0.0.0.0/8` block
+/// - addresses reserved for future protocols, except
+/// `192.0.0.9/32` and `192.0.0.10/32` which are globally routable
+/// - addresses reserved for future use (see [IETF RFC 1112])
+/// - addresses reserved for networking devices benchmarking (see [IETF RFC 2544])
+///
+/// [ipv4-sr]: https://www.iana.org/assignments/iana-ipv4-special-registry/iana-ipv4-special-registry.xhtml
+///
+/// @todo: replace with [`Ipv4Addr::is_global`] when it becomes stable
+pub(crate) const fn is_global_ipv4(ip: &Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    // check if this address is 192.0.0.9 or 192.0.0.10. These addresses are the only two
+    // globally routable addresses in the 192.0.0.0/24 range.
+    {
+        let ip = u32::from_be_bytes(octets);
+        if ip == 0xc0000009 || ip == 0xc000000a {
+            return true;
+        }
+    }
+    !ip.is_private()
+        && !ip.is_loopback()
+        && !ip.is_link_local()
+        && !ip.is_broadcast()
+        && !ip.is_documentation()
+        // address is part of the Shared Address Space defined in [IETF RFC 6598] (`100.64.0.0/10`)
+        && !(octets[0] == 100 && (octets[1] & 0b1100_0000 == 0b0100_0000))
+        // addresses reserved for future protocols (`192.0.0.0/24`)
+        && !(octets[0] == 192 && octets[1] == 0 && octets[2] == 0)
+        // address is reserved by IANA for future use [IETF RFC 1112]
+        && !(octets[0] & 240 == 240 && !ip.is_broadcast())
+        // reserved for network devices benchmarking [IETF RFC 2544]
+        && !(octets[0] == 198 && (octets[1] & 0xfe) == 18)
+        // Make sure the address is not in 0.0.0.0/8
+        && octets[0] != 0
+}
+
+/// Returns [`true`] if the address is a globally routable unicast address.
+///
+/// The following return false:
+///
+/// - the loopback address
+/// - the link-local addresses
+/// - unique local addresses
+/// - the unspecified address
+/// - the address range reserved for documentation
+///
+/// This method returns [`true`] for site-local addresses as per [RFC 4291 section 2.5.7]
+///
+/// [RFC 4291 section 2.5.7]: https://tools.ietf.org/html/rfc4291#section-2.5.7
+///
+/// @todo: replace with [`Ipv6Addr::is_unicast_global`] when it becomes stable
+#[must_use]
+#[inline]
+pub(crate) const fn is_unicast_global_ipv6(ip: &Ipv6Addr) -> bool {
+    let segments = ip.segments();
+
+    !ip.is_multicast()
+        && !ip.is_loopback()
+        // unicast address with link-local scope [RFC 4291]
+        && (segments[0] & 0xffc0) != 0xfe80
+        // unique local address (`fc00::/7`) [IETF RFC 4193]
+        && (segments[0] & 0xfe00) != 0xfc00
+        && !ip.is_unspecified()
+        // address reserved for documentation (`2001:db8::/32`) [IETF RFC 3849]
+        && !((segments[0] == 0x2001) && (segments[1] == 0xdb8))
+}
+
+/// Returns [`true`] if the address appears to be globally routable.
+///
+/// The following return [`false`]:
+///
+/// - the loopback address
+/// - link-local and unique local unicast addresses
+/// - interface-, link-, realm-, admin- and site-local multicast addresses
+///
+/// @todo: replace with [`Ipv6Addr::is_global`] when it becomes stable
+#[must_use]
+#[inline]
+pub(crate) const fn is_global_ipv6(ip: &Ipv6Addr) -> bool {
+    match ip.segments()[0] & 0x000f {
+        1 // Interface-local scope (same node)
+        | 2 // Link-local scope (same link)
+        | 3 // Subnet-local scope
+        | 4 // Admin-local scope
+        | 5 // Site-local scope (same site)
+        | 8 // Organization-local scope
+        => false,
+        0x0e => true, // Global scope
+        _ => is_unicast_global_ipv6(ip),
+    }
+}
+
+/// Returns [`true`] if the address appears to be globally routable
+#[must_use]
+#[inline]
+pub(crate) const fn is_global_ip(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(x) => is_global_ipv4(x),
+        IpAddr::V6(x) => is_global_ipv6(x),
+    }
+}

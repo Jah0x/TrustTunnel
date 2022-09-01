@@ -1,13 +1,13 @@
 use std::collections::LinkedList;
 use std::io;
 use std::io::ErrorKind;
-use std::net::SocketAddr;
+use std::net::IpAddr;
 use std::sync::Arc;
 use http::StatusCode;
 use async_trait::async_trait;
 use bytes::Bytes;
 use crate::downstream::Downstream;
-use crate::{authentication, datagram_pipe, downstream, http_codec, http_datagram_codec, http_forwarded_stream, http_icmp_codec, http_udp_codec, log_id, log_utils, net_utils, pipe};
+use crate::{authentication, datagram_pipe, downstream, http_codec, http_datagram_codec, http_forwarded_stream, http_icmp_codec, http_udp_codec, log_id, log_utils, net_utils, pipe, tunnel};
 use crate::protocol_selector::Protocol;
 use crate::http_codec::HttpCodec;
 use crate::net_utils::TcpDestination;
@@ -25,40 +25,12 @@ const AUTHORIZATION_FAILURE_EXTRA_HEADER: (&str, &str) =
 
 const BAD_STATUS_CODE: StatusCode = StatusCode::BAD_GATEWAY;
 const WARNING_HEADER_NAME: &str = "X-Warning";
-
-/// DNS resolution failed (reasons see below)
-/// HTTP/1.1 502 Bad Gateway
-/// X-Adguard-Vpn-Error: <hostname>
-/// X-Warning: <warn-code> - <warn-text>
-///
-/// For other reasons:
-/// HTTP/1.1 502 Bad Gateway
-/// X-Warning: <warn-code> - <warn-text>
-struct Warning {
-    code: u32,
-    text: &'static str,
-}
-
-impl Warning {
-    const fn new(code: u32, text: &'static str) -> Self {
-        Warning{ code, text }
-    }
-
-    fn make_header_value(&self) -> String {
-        format!("{} - {}", self.code, self.text)
-    }
-
-    const CONNECTION_FAILED: Warning = Warning::new(300, "Connection failed for some reasons");
-    const HOST_UNREACHABLE: Warning = Warning::new(301, "Remote host is unreachable");
-    const CONNECTION_TIMEDOUT: Warning = Warning::new(302, "Connection timed out");
-    const DNS_NONROUTABLE: Warning = Warning::new(310, "DNS: resolved address in non-routable network");
-    const DNS_LOOPBACK: Warning = Warning::new(311, "DNS: resolved address in loopback");
-    const DNS_BLOCKED: Warning = Warning::new(312, "DNS: blocked by Adguard DNS");
-}
+const DNS_WARNING_HEADER_NAME: &str = "X-Adguard-Vpn-Error";
 
 
 pub(crate) struct HttpDownstream {
     codec: Box<dyn HttpCodec>,
+    tls_domain: String,
 }
 
 struct TcpConnection {
@@ -82,7 +54,7 @@ struct DatagramDecoder<D> {
     pending_bytes: LinkedList<Bytes>,
 }
 
-struct PendingAuthorization {
+struct PendingRequest {
     stream: Box<dyn http_codec::Stream>,
     id: log_utils::IdChain<u64>,
 }
@@ -91,57 +63,27 @@ impl HttpDownstream {
     pub fn new(
         _core_settings: Arc<Settings>,
         codec: Box<dyn HttpCodec>,
+        tls_domain: String,
     ) -> Self {
         Self {
             codec,
+            tls_domain,
         }
     }
 }
 
 #[async_trait]
 impl Downstream for HttpDownstream {
-    async fn listen(&mut self) -> io::Result<Option<Box<dyn downstream::AuthorizationRequest>>> {
-        loop {
-            let stream = match self.codec.listen().await? {
-                None => return Ok(None),
-                Some(s) => s,
-            };
-            let request = stream.request().request();
-            let stream_id = stream.id();
-            log_id!(trace, stream_id, "Received request: {:?}", request);
+    async fn listen(&mut self) -> io::Result<Option<Box<dyn downstream::PendingMultiplexedRequest>>> {
+        let stream = match self.codec.listen().await? {
+            None => return Ok(None),
+            Some(s) => s,
+        };
+        let request = stream.request().request();
+        let stream_id = stream.id();
+        log_id!(trace, stream_id, "Received request: {:?}", request);
 
-            let authority = match request.uri.authority() {
-                Some(a) => a.to_string(),
-                None => {
-                    log_id!(debug, stream_id, "Authority not found: {:?}", request);
-                    fail_request(stream, BAD_STATUS_CODE, vec![]);
-                    continue;
-                }
-            };
-
-            let (is_health_check, is_datagram_mux) = match authority.as_str() {
-                HEALTH_CHECK_AUTHORITY => (true, false),
-                UDP_AUTHORITY | ICMP_AUTHORITY => (false, true),
-                _ => (false, false),
-            };
-
-            if (is_health_check || is_datagram_mux) && request.method != http::Method::CONNECT {
-                log_id!(debug, stream_id, "Unexpected request method: {:?}", request);
-                fail_request(stream, BAD_STATUS_CODE, vec![]);
-                continue;
-            }
-
-            if is_health_check {
-                break Ok(Some(Box::new(PendingAuthorization { stream, id: stream_id })));
-            }
-            if is_datagram_mux {
-                break Ok(Some(Box::new(DatagramMultiplexer {
-                    stream,
-                    id: stream_id,
-                })));
-            }
-            break Ok(Some(Box::new(TcpConnection { stream, id: stream_id })));
-        }
+        Ok(Some(Box::new(PendingRequest { stream, id: stream_id })))
     }
 
     async fn graceful_shutdown(&mut self) -> io::Result<()> {
@@ -151,30 +93,46 @@ impl Downstream for HttpDownstream {
     fn protocol(&self) -> Protocol {
         self.codec.protocol()
     }
-}
 
-impl downstream::StreamId for TcpConnection {
-    fn id(&self) -> log_utils::IdChain<u64> {
-        self.id.clone()
+    fn tls_domain(&self) -> &str {
+        &self.tls_domain
     }
 }
 
-impl downstream::AuthorizationRequest for TcpConnection {
-    fn auth_info(&self) -> io::Result<Option<authentication::Source>> {
-        self.stream.request().auth_info()
+macro_rules! impl_stream_id {
+    (for $($t:ty),+) => {
+        $(impl downstream::StreamId for $t {
+            fn id(&self) -> log_utils::IdChain<u64> {
+                self.id.clone()
+            }
+        })*
+    }
+}
+
+impl_stream_id!(for PendingRequest, TcpConnection, DatagramMultiplexer);
+
+impl downstream::PendingRequest for TcpConnection {
+    type NextState = (Box<dyn pipe::Source>, Box<dyn pipe::Sink>);
+
+    fn promote_to_next_state(self: Box<Self>) -> io::Result<Self::NextState> {
+        if self.stream.request().request().method == http::Method::CONNECT {
+            let (source, sink) = self.stream.split();
+            return Ok((
+                source.finalize(),
+                sink.send_ok_response(false)?.into_pipe_sink(),
+            ));
+        }
+
+        http_forwarded_stream::into_forwarded(self.stream)
     }
 
-    fn succeed_request(self: Box<Self>) -> io::Result<Option<downstream::AuthorizedRequest>> {
-        Ok(Some(downstream::AuthorizedRequest::TcpConnect(self)))
-    }
-
-    fn fail_request(self: Box<Self>) {
-        fail_auth_request(self.stream)
+    fn fail_request(self: Box<Self>, error: tunnel::ConnectionError) {
+        fail_request_with_error(self.stream, error);
     }
 }
 
 impl downstream::PendingTcpConnectRequest for TcpConnection {
-    fn client_address(&self) -> io::Result<SocketAddr> {
+    fn client_address(&self) -> io::Result<IpAddr> {
         self.stream.request().client_address()
     }
 
@@ -200,82 +158,52 @@ impl downstream::PendingTcpConnectRequest for TcpConnection {
         })
     }
 
-    fn client_platform(&self) -> Option<String> {
-        self.stream.request().client_platform()
+    fn user_agent(&self) -> Option<String> {
+        self.stream.request().user_agent()
     }
+}
 
-    fn app_name(&self) -> Option<String> {
-        self.stream.request().app_name()
-    }
+impl downstream::PendingRequest for PendingRequest {
+    type NextState = Option<downstream::PendingDemultiplexedRequest>;
 
-    fn succeed_request(self: Box<Self>) -> io::Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>)> {
-        if self.stream.request().request().method == http::Method::CONNECT {
-            let (source, sink) = self.stream.split();
-            return Ok((
-                source.finalize(),
-                sink.send_ok_response(false)?.into_pipe_sink(),
-            ));
+    fn promote_to_next_state(self: Box<Self>) -> io::Result<Self::NextState> {
+        let request = self.stream.request().request();
+
+        match request.uri.authority().map(http::uri::Authority::as_str) {
+            Some(HEALTH_CHECK_AUTHORITY) if request.method == http::Method::CONNECT =>
+                self.stream.split().1.send_ok_response(true).map(|_| None),
+            Some(UDP_AUTHORITY) | Some(ICMP_AUTHORITY) if request.method == http::Method::CONNECT =>
+                Ok(Some(downstream::PendingDemultiplexedRequest::DatagramMultiplexer(Box::new(DatagramMultiplexer {
+                    stream: self.stream,
+                    id: self.id,
+                })))),
+            Some(HEALTH_CHECK_AUTHORITY) | Some(UDP_AUTHORITY) | Some(ICMP_AUTHORITY) => {
+                log_id!(debug, self.id, "Unexpected request method: {:?}", request);
+                fail_request(self.stream, BAD_STATUS_CODE, vec![]);
+                Ok(None)
+            }
+            _ => Ok(Some(downstream::PendingDemultiplexedRequest::TcpConnect(Box::new(TcpConnection {
+                stream: self.stream,
+                id: self.id,
+            })))),
         }
-
-        http_forwarded_stream::into_forwarded(self.stream)
     }
 
-    fn fail_request(self: Box<Self>, error: io::Error) -> io::Result<()> {
-        fail_request(self.stream, BAD_STATUS_CODE, vec![io_error_to_warn_header(Some(error))]);
-        Ok(())
+    fn fail_request(self: Box<Self>, error: tunnel::ConnectionError) {
+        fail_request_with_error(self.stream, error);
     }
 }
 
-impl downstream::StreamId for PendingAuthorization {
-    fn id(&self) -> log_utils::IdChain<u64> {
-        self.id.clone()
-    }
-}
-
-impl downstream::AuthorizationRequest for PendingAuthorization {
+impl downstream::PendingMultiplexedRequest for PendingRequest {
     fn auth_info(&self) -> io::Result<Option<authentication::Source>> {
         self.stream.request().auth_info()
     }
-
-    fn succeed_request(self: Box<Self>) -> io::Result<Option<downstream::AuthorizedRequest>> {
-        self.stream.split().1.send_ok_response(true).map(|_| None)
-    }
-
-    fn fail_request(self: Box<Self>) {
-        fail_auth_request(self.stream)
-    }
 }
 
-impl downstream::StreamId for DatagramMultiplexer {
-    fn id(&self) -> log_utils::IdChain<u64> {
-        self.id.clone()
-    }
-}
+impl downstream::PendingRequest for DatagramMultiplexer {
+    type NextState = downstream::DatagramPipeHalves;
 
-impl downstream::AuthorizationRequest for DatagramMultiplexer {
-    fn auth_info(&self) -> io::Result<Option<authentication::Source>> {
-        self.stream.request().auth_info()
-    }
-
-    fn succeed_request(self: Box<Self>) -> io::Result<Option<downstream::AuthorizedRequest>> {
-        Ok(Some(downstream::AuthorizedRequest::DatagramMultiplexer(self)))
-    }
-
-    fn fail_request(self: Box<Self>) {
-        fail_auth_request(self.stream)
-    }
-}
-
-impl downstream::PendingDatagramMultiplexerRequest for DatagramMultiplexer {
-    fn client_address(&self) -> io::Result<SocketAddr> {
-        self.stream.request().client_address()
-    }
-
-    fn client_platform(&self) -> Option<String> {
-        self.stream.request().client_platform()
-    }
-
-    fn succeed_request(self: Box<Self>) -> io::Result<downstream::DatagramPipeHalves> {
+    fn promote_to_next_state(self: Box<Self>) -> io::Result<Self::NextState> {
         let authority = self.stream.request().authority()?.to_string();
         let (source, sink) = self.stream.split();
         match authority.as_str() {
@@ -307,9 +235,18 @@ impl downstream::PendingDatagramMultiplexerRequest for DatagramMultiplexer {
         }
     }
 
-    fn fail_request(self: Box<Self>, error: io::Error) -> io::Result<()> {
-        fail_request(self.stream, BAD_STATUS_CODE, vec![io_error_to_warn_header(Some(error))]);
-        Ok(())
+    fn fail_request(self: Box<Self>, error: tunnel::ConnectionError) {
+        fail_request_with_error(self.stream, error);
+    }
+}
+
+impl downstream::PendingDatagramMultiplexerRequest for DatagramMultiplexer {
+    fn client_address(&self) -> io::Result<IpAddr> {
+        self.stream.request().client_address()
+    }
+
+    fn user_agent(&self) -> Option<String> {
+        self.stream.request().user_agent()
     }
 }
 
@@ -366,23 +303,38 @@ impl<D: Send> datagram_pipe::Sink for DatagramEncoder<D> {
     }
 }
 
-fn io_error_to_warn_header(error: Option<io::Error>) -> (String, String) {
-    (
-        WARNING_HEADER_NAME.to_string(),
-        error.map_or(
-            Warning::CONNECTION_FAILED.make_header_value(),
-            |e| match e {
-                // for now, `ErrorKind::HostUnreachable` and `ErrorKind::NetworkUnreachable` are unstable
-                e if e.raw_os_error() == Some(libc::ENETUNREACH)
-                    || e.raw_os_error() == Some(libc::EHOSTUNREACH)
-                => Warning::HOST_UNREACHABLE.make_header_value(),
-                _ => match e.kind() {
-                    ErrorKind::TimedOut => Warning::CONNECTION_TIMEDOUT.make_header_value(),
-                    _ => Warning::CONNECTION_FAILED.make_header_value(),
-                }
-            }
-        )
-    )
+fn tunnel_error_to_status_code(error: &tunnel::ConnectionError) -> StatusCode {
+    match error {
+        tunnel::ConnectionError::Authentication(_) => AUTHORIZATION_FAILURE_STATUS_CODE,
+        _ => BAD_STATUS_CODE,
+    }
+}
+
+fn tunnel_error_to_warn_header(error: &tunnel::ConnectionError, hostname: &str) -> Vec<(String, String)> {
+    match error {
+        tunnel::ConnectionError::Io(_) =>
+            vec![(WARNING_HEADER_NAME.to_string(), "300 - Connection failed for some reason".to_string())],
+        tunnel::ConnectionError::Authentication(_) =>
+            vec![(AUTHORIZATION_FAILURE_EXTRA_HEADER.0.to_string(), AUTHORIZATION_FAILURE_EXTRA_HEADER.1.to_string())],
+        tunnel::ConnectionError::Timeout =>
+            vec![(WARNING_HEADER_NAME.to_string(), format!("302 - {}", error))],
+        tunnel::ConnectionError::HostUnreachable =>
+            vec![(WARNING_HEADER_NAME.to_string(), format!("301 - {}", error))],
+        tunnel::ConnectionError::DnsNonroutable => vec![
+            (DNS_WARNING_HEADER_NAME.to_string(), hostname.to_string()),
+            (WARNING_HEADER_NAME.to_string(), format!("310 - {}", error)),
+        ],
+        tunnel::ConnectionError::DnsLoopback => vec![
+            (DNS_WARNING_HEADER_NAME.to_string(), hostname.to_string()),
+            (WARNING_HEADER_NAME.to_string(), format!("311 - {}", error)),
+        ],
+        tunnel::ConnectionError::DnsBlocked => vec![
+            (DNS_WARNING_HEADER_NAME.to_string(), hostname.to_string()),
+            (WARNING_HEADER_NAME.to_string(), format!("312 - {}", error)),
+        ],
+        tunnel::ConnectionError::Other(_) =>
+            vec![(WARNING_HEADER_NAME.to_string(), "300 - Connection failed for some reason".to_string())],
+    }
 }
 
 fn fail_request(stream: Box<dyn http_codec::Stream>, status: StatusCode, extra_headers: Vec<(String, String)>) {
@@ -392,10 +344,13 @@ fn fail_request(stream: Box<dyn http_codec::Stream>, status: StatusCode, extra_h
     }
 }
 
-fn fail_auth_request(stream: Box<dyn http_codec::Stream>) {
-    fail_request(
-        stream,
-        AUTHORIZATION_FAILURE_STATUS_CODE,
-        vec![(AUTHORIZATION_FAILURE_EXTRA_HEADER.0.to_string(), AUTHORIZATION_FAILURE_EXTRA_HEADER.1.to_string())],
-    )
+fn fail_request_with_error(stream: Box<dyn http_codec::Stream>, error: tunnel::ConnectionError) {
+    let extra_headers = tunnel_error_to_warn_header(&error, request_hostname(stream.request()));
+    fail_request(stream, tunnel_error_to_status_code(&error), extra_headers);
+}
+
+fn request_hostname(request: &dyn http_codec::PendingRequest) -> &str {
+    request.authority()
+        .map(http::uri::Authority::as_str)
+        .unwrap_or_default()
 }

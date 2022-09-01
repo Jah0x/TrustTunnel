@@ -172,23 +172,27 @@ The full set of settings is shown bellow in the pseudo-json format:
     },
     ...
   ],
-  /// The client authenticator
-  "authenticator": Enum {
-    "file": {
-      "path": "auth_info.txt"
-    },
-    "radius": {
-      /// The RADIUS server address
-      "server_address": "127.0.0.1:1813",
-      /// Timeout of the authentication procedure
-      "timeout_secs": Default(3),
-      /// The password shared between the client and the RADIUS server
-      "secret": "String",
-      /// The authentication cache capacity
-      #[serde(default = "RadiusAuthenticatorSettings::default_cache_size")]
-      "cache_size": Default(1024),
-      /// The authentication cache entry TTL
-      "cache_ttl_secs": Default(10)
+  /// The client authenticator.
+  /// If this one is omitted and `forward_protocol` is set to `socks5`,
+  /// the endpoint will try to authenticate requests using the SOCKS5 authentication protocol.
+  "authenticator": Optional {
+    Enum {
+      "file": {
+        "path": "auth_info.txt"
+      },
+      "radius": {
+        /// The RADIUS server address
+        "server_address": "127.0.0.1:1813",
+        /// Timeout of the authentication procedure
+        "timeout_secs": Default(3),
+        /// The password shared between the client and the RADIUS server
+        "secret": "String",
+        /// The authentication cache capacity
+        #[serde(default = "RadiusAuthenticatorSettings::default_cache_size")]
+        "cache_size": Default(1024),
+        /// The authentication cache entry TTL
+        "cache_ttl_secs": Default(10)
+      }
     }
   },
   /// The ICMP forwarding settings.

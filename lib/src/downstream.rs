@@ -3,7 +3,7 @@ use std::io;
 use std::net::{IpAddr, SocketAddr};
 use async_trait::async_trait;
 use bytes::Bytes;
-use crate::{authentication, datagram_pipe, forwarder, icmp_utils, log_utils, pipe};
+use crate::{authentication, datagram_pipe, forwarder, icmp_utils, log_utils, pipe, tunnel};
 use crate::protocol_selector::Protocol;
 use crate::net_utils::TcpDestination;
 
@@ -37,42 +37,46 @@ pub(crate) trait StreamId {
     fn id(&self) -> log_utils::IdChain<u64>;
 }
 
-/// An abstract interface for an authorization request implementation
-pub(crate) trait AuthorizationRequest: StreamId + Send {
-    /// Get the authorization info
-    fn auth_info(&self) -> io::Result<Option<authentication::Source>>;
+/// An abstract interface for a still-not-responded request
+pub(crate) trait PendingRequest: StreamId + Send {
+    type NextState;
 
-    /// Proceed the successfully authorized request
-    fn succeed_request(self: Box<Self>) -> io::Result<Option<AuthorizedRequest>>;
+    /// Proceed the request to the next state
+    fn promote_to_next_state(self: Box<Self>) -> io::Result<Self::NextState>;
 
-    /// Reject the request failed authorization
-    fn fail_request(self: Box<Self>);
+    /// Notify a client of a multiplexer open failure
+    fn fail_request(self: Box<Self>, error: tunnel::ConnectionError);
 }
 
-pub(crate) enum AuthorizedRequest {
+/// An abstract interface for a pre-demultiplexed request
+pub(crate) trait PendingMultiplexedRequest:
+    StreamId
+    + PendingRequest<NextState = Option<PendingDemultiplexedRequest>>
+    + Send
+{
+    /// Get the authorization info
+    fn auth_info(&self) -> io::Result<Option<authentication::Source>>;
+}
+
+pub(crate) enum PendingDemultiplexedRequest {
     TcpConnect(Box<dyn PendingTcpConnectRequest>),
     DatagramMultiplexer(Box<dyn PendingDatagramMultiplexerRequest>),
 }
 
 /// An abstract interface for a TCP connection request implementation
-pub(crate) trait PendingTcpConnectRequest: StreamId + Send {
+pub(crate) trait PendingTcpConnectRequest:
+    StreamId
+    + PendingRequest<NextState = (Box<dyn pipe::Source>, Box<dyn pipe::Sink>)>
+    + Send
+{
     /// Get the address of a VPN client made the connection request
-    fn client_address(&self) -> io::Result<SocketAddr>;
+    fn client_address(&self) -> io::Result<IpAddr>;
 
     /// Get the target host
     fn destination(&self) -> io::Result<TcpDestination>;
 
-    /// Get the name of a platform of the VPN client
-    fn client_platform(&self) -> Option<String>;
-
-    /// Get the name of an application initiated the request
-    fn app_name(&self) -> Option<String>;
-
-    /// Notify a client of the successfully tunneled connection
-    fn succeed_request(self: Box<Self>) -> io::Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>)>;
-
-    /// Notify a client of a connection failure
-    fn fail_request(self: Box<Self>, error: io::Error) -> io::Result<()>;
+    /// Get the user agent
+    fn user_agent(&self) -> Option<String>;
 }
 
 pub(crate) enum DatagramPipeHalves {
@@ -81,18 +85,16 @@ pub(crate) enum DatagramPipeHalves {
 }
 
 /// An abstract interface for a datagram multiplexer open request implementation
-pub(crate) trait PendingDatagramMultiplexerRequest: StreamId + Send {
+pub(crate) trait PendingDatagramMultiplexerRequest:
+    StreamId
+    + PendingRequest<NextState = DatagramPipeHalves>
+    + Send
+{
     /// Get the address of a VPN client made the connection request
-    fn client_address(&self) -> io::Result<SocketAddr>;
+    fn client_address(&self) -> io::Result<IpAddr>;
 
-    /// Get the name of a platform of the VPN client
-    fn client_platform(&self) -> Option<String>;
-
-    /// Notify a client of the successfully opened multiplexer
-    fn succeed_request(self: Box<Self>) -> io::Result<DatagramPipeHalves>;
-
-    /// Notify a client of a multiplexer open failure
-    fn fail_request(self: Box<Self>, error: io::Error) -> io::Result<()>;
+    /// Get the user agent
+    fn user_agent(&self) -> Option<String>;
 }
 
 /// An abstract interface for a downstream implementation which communicates with a client
@@ -102,13 +104,16 @@ pub(crate) trait Downstream: Send {
     /// Returns `None` in case the listening finished gracefully and should not be continued,
     /// `Some` in case the downstream encountered the new authorization request which should be
     /// processed and listening should be continued.
-    async fn listen(&mut self) -> io::Result<Option<Box<dyn AuthorizationRequest>>>;
+    async fn listen(&mut self) -> io::Result<Option<Box<dyn PendingMultiplexedRequest>>>;
 
     /// Shut down the downstream connection gracefully
     async fn graceful_shutdown(&mut self) -> io::Result<()>;
 
     /// Get the downstream protocol
     fn protocol(&self) -> Protocol;
+
+    /// Get the domain name used for TLS session (SNI)
+    fn tls_domain(&self) -> &str;
 }
 
 impl Debug for UdpDatagram {

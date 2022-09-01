@@ -4,7 +4,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
-use crate::{authentication, datagram_pipe, downstream, icmp_utils, log_utils, pipe};
+use crate::{authentication, datagram_pipe, downstream, icmp_utils, log_utils, pipe, tunnel};
 use crate::net_utils::TcpDestination;
 
 
@@ -33,31 +33,51 @@ pub(crate) struct IcmpDatagram {
 #[derive(Debug)]
 pub(crate) struct TcpConnectionMeta {
     /// Address of a VPN client made the connection request
-    pub client_address: SocketAddr,
+    pub client_address: IpAddr,
     /// Destination address of the connection
     pub destination: TcpDestination,
     /// Authentication request source
     pub auth: Option<authentication::Source<'static>>,
-    /// The name of a platform of the VPN client
-    pub client_platform: Option<String>,
-    /// The name of an application initiated the request
-    pub app_name: Option<String>,
+    /// The domain name used for TLS session (SNI)
+    pub tls_domain: String,
+    /// May contain a platform name of the VPN client and name of the application
+    /// initiated the request
+    pub user_agent: Option<String>,
 }
 
 pub(crate) struct UdpMultiplexerMeta {
     /// An address of the VPN client establishing the UDP tunnel
-    pub client_address: SocketAddr,
+    pub client_address: IpAddr,
     /// Authentication request source
     pub auth: Option<authentication::Source<'static>>,
-    /// The name of a platform of the VPN client
-    pub client_platform: Option<String>,
+    /// The domain name used for TLS session (SNI)
+    pub tls_domain: String,
+    /// May contain a platform name of the VPN client
+    pub user_agent: Option<String>,
 }
 
 /// An abstract interface for a TCP connector implementation
 #[async_trait]
 pub(crate) trait TcpConnector: Send {
     /// Establish TCP connection to the peer
-    async fn connect(self: Box<Self>) -> io::Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>)>;
+    async fn connect(
+        self: Box<Self>,
+        id: log_utils::IdChain<u64>,
+        meta: TcpConnectionMeta,
+    ) -> Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>), tunnel::ConnectionError>;
+}
+
+/// An abstract interface for a datagram multiplexer authenticator
+#[async_trait]
+pub(crate) trait DatagramMultiplexerAuthenticator: Send {
+    /// Perform an authentication procedure
+    async fn check_auth(
+        self: Box<Self>,
+        client_address: IpAddr,
+        tls_domain: &'_ str,
+        auth: authentication::Source<'_>,
+        user_agent: Option<&'_ str>,
+    ) -> Result<(), tunnel::ConnectionError>;
 }
 
 /// Encapsulates a shared state of the pipe's source and sink.
@@ -83,15 +103,14 @@ pub(crate) enum UdpDatagramReadStatus {
 /// An abstract interface for a traffic forwarder implementation
 pub(crate) trait Forwarder: Send {
     /// Create a TCP connector object
-    fn tcp_connector(
-        &mut self,
-        id: log_utils::IdChain<u64>,
-        meta: TcpConnectionMeta,
-    ) -> io::Result<Box<dyn TcpConnector>>;
+    fn tcp_connector(&self) -> Box<dyn TcpConnector>;
+
+    /// Create a datagram multiplexer authenticator
+    fn datagram_mux_authenticator(&self) -> Box<dyn DatagramMultiplexerAuthenticator>;
 
     /// Create a UDP datagram multiplexer
     fn make_udp_datagram_multiplexer(
-        &mut self,
+        &self,
         id: log_utils::IdChain<u64>,
         meta: UdpMultiplexerMeta,
     ) -> io::Result<(
@@ -102,7 +121,7 @@ pub(crate) trait Forwarder: Send {
 
     /// Create an ICMP datagram multiplexer
     fn make_icmp_datagram_multiplexer(
-        &mut self, id: log_utils::IdChain<u64>
+        &self, id: log_utils::IdChain<u64>
     ) -> io::Result<(
         Box<dyn datagram_pipe::Source<Output = IcmpDatagram>>,
         Box<dyn datagram_pipe::Sink<Input = downstream::IcmpDatagram>>,

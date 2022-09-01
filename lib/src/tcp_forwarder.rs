@@ -1,5 +1,6 @@
 use std::io;
 use std::io::ErrorKind;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::{Buf, Bytes};
@@ -8,18 +9,12 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 use crate::forwarder::TcpConnector;
 use crate::net_utils::TcpDestination;
-use crate::{log_id, log_utils, pipe};
+use crate::{forwarder, log_id, log_utils, net_utils, pipe, tunnel};
 use crate::settings::Settings;
 
 
 pub(crate) struct TcpForwarder {
     core_settings: Arc<Settings>,
-}
-
-struct Connector {
-    destination: TcpDestination,
-    ipv6_available: bool,
-    id: log_utils::IdChain<u64>,
 }
 
 struct StreamRx {
@@ -41,16 +36,6 @@ impl TcpForwarder {
         }
     }
 
-    pub fn connect_tcp(
-        &self, id: log_utils::IdChain<u64>, destination: TcpDestination,
-    ) -> io::Result<Box<dyn TcpConnector>> {
-        Ok(Box::new(Connector {
-            destination,
-            ipv6_available: self.core_settings.ipv6_available,
-            id,
-        }))
-    }
-
     pub fn pipe_from_stream(
         stream: TcpStream, id: log_utils::IdChain<u64>
     ) -> (Box<dyn pipe::Source>, Box<dyn pipe::Sink>) {
@@ -69,27 +54,63 @@ impl TcpForwarder {
 }
 
 #[async_trait]
-impl TcpConnector for Connector {
-    async fn connect(self: Box<Self>) -> io::Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>)> {
-        let peer = match self.destination {
+impl TcpConnector for TcpForwarder {
+    async fn connect(
+        self: Box<Self>,
+        id: log_utils::IdChain<u64>,
+        meta: forwarder::TcpConnectionMeta,
+    ) -> Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>), tunnel::ConnectionError> {
+        let peer = match meta.destination {
             TcpDestination::Address(peer) => peer,
             TcpDestination::HostName(peer) => {
-                log_id!(trace, self.id, "Resolving peer: {:?}", peer);
+                log_id!(trace, id, "Resolving peer: {:?}", peer);
 
                 let resolved = tokio::net::lookup_host(format!("{}:{}", peer.0, peer.1)).await
-                    .and_then(|mut addrs|
-                        addrs.find(|a| self.ipv6_available || a.is_ipv4()).ok_or_else(
-                            || io::Error::new(ErrorKind::Other, "Acceptable address not found")
-                        ))?;
-                log_id!(trace, self.id, "Peer successfully resolved: {}", resolved);
-                resolved
+                    .map_err(io_to_connection_error)?;
+
+                enum SelectionStatus {
+                    Loopback,
+                    NonRoutable,
+                    Suitable(SocketAddr),
+                }
+
+                let mut status = None;
+                for a in resolved {
+                    let ip = a.ip();
+                    if net_utils::is_global_ip(&ip)
+                        && !(ip.is_ipv6() && !self.core_settings.ipv6_available)
+                    {
+                        status = Some(SelectionStatus::Suitable(a));
+                        break;
+                    }
+
+                    if status.is_none() && ip.is_loopback() {
+                        status = Some(SelectionStatus::Loopback);
+                        continue;
+                    }
+
+                    status = Some(SelectionStatus::NonRoutable);
+                }
+
+                match status {
+                    None => return Err(io_to_connection_error(io::Error::new(
+                        ErrorKind::Other, "Resolved to empty list"
+                    ))),
+                    Some(SelectionStatus::Loopback) => return Err(tunnel::ConnectionError::DnsLoopback),
+                    Some(SelectionStatus::NonRoutable) => return Err(tunnel::ConnectionError::DnsNonroutable),
+                    Some(SelectionStatus::Suitable(x)) => {
+                        log_id!(trace, id, "Selected address: {}", x);
+                        x
+                    }
+                }
             }
         };
 
-        log_id!(trace, self.id, "Connecting to peer: {}", peer);
-        let stream = TcpStream::connect(peer).await
-            .and_then(|s| { s.set_nodelay(true)?; Ok(s) })?;
-        Ok(TcpForwarder::pipe_from_stream(stream, self.id))
+        log_id!(trace, id, "Connecting to peer: {}", peer);
+        TcpStream::connect(peer).await
+            .and_then(|s| { s.set_nodelay(true)?; Ok(s) })
+            .map(|s| TcpForwarder::pipe_from_stream(s, id))
+            .map_err(io_to_connection_error)
     }
 }
 
@@ -148,4 +169,19 @@ impl pipe::Sink for StreamTx {
     async fn wait_writable(&mut self) -> io::Result<()> {
         self.tx.writable().await
     }
+}
+
+fn io_to_connection_error(error: io::Error) -> tunnel::ConnectionError {
+    // for now, corresponding ErrorKind's are not stable
+    if error.raw_os_error() == Some(libc::ENETUNREACH)
+        || error.raw_os_error() == Some(libc::EHOSTUNREACH)
+    {
+        return tunnel::ConnectionError::HostUnreachable;
+    }
+
+    if error.kind() == ErrorKind::TimedOut {
+        return tunnel::ConnectionError::Timeout;
+    }
+
+    tunnel::ConnectionError::Io(error)
 }

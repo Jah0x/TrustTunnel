@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UdpSocket};
 use crate::direct_forwarder::DirectForwarder;
 use crate::{authentication, http_ping_handler, log_id, log_utils, metrics, net_utils, protocol_selector, reverse_proxy, settings, tunnel, utils};
-use crate::authentication::DummyAuthenticator;
+use crate::authentication::RedirectToForwarderAuthenticator;
 use crate::protocol_selector::{Channel, Protocol};
 use crate::forwarder::Forwarder;
 use crate::http1_codec::Http1Codec;
@@ -17,7 +17,7 @@ use crate::http_downstream::HttpDownstream;
 use crate::icmp_forwarder::IcmpForwarder;
 use crate::metrics::Metrics;
 use crate::quic_multiplexer::{QuicMultiplexer, QuicSocket};
-use crate::settings::{ForwardProtocolSettings, ListenProtocolSettings, Settings, Socks5ForwarderSettings};
+use crate::settings::{ForwardProtocolSettings, ListenProtocolSettings, Settings};
 use crate::shutdown::Shutdown;
 use crate::socks5_forwarder::Socks5Forwarder;
 use crate::tls_listener::{TlsAcceptor, TlsListener};
@@ -53,11 +53,10 @@ impl Core {
             settings.validate().map_err(Error::SettingsValidation)?;
         }
 
-        match &settings.forward_protocol {
-            ForwardProtocolSettings::Socks5(Socks5ForwarderSettings { extended_auth: true, .. }) => {
-                settings.authenticator = Arc::new(DummyAuthenticator::redirect_to_forwarder());
-            },
-            _ => (),
+        if settings.authenticator.is_none()
+            && matches!(settings.forward_protocol, ForwardProtocolSettings::Socks5(_))
+        {
+            settings.authenticator = Some(Arc::new(RedirectToForwarderAuthenticator::default()));
         }
 
         let settings = Arc::new(settings);
@@ -300,7 +299,7 @@ impl Core {
                         Ok(x) => x,
                         Err(e) => return Err((client_id, format!("Failed to create HTTP codec: {}", e))),
                     },
-                    &sni,
+                    sni,
                     tunnel_id,
                 ).await
             }
@@ -372,7 +371,7 @@ impl Core {
                     context,
                     protocol,
                     Box::new(Http3Codec::new(socket, tunnel_id.clone())),
-                    &sni,
+                    sni,
                     tunnel_id,
                 ).await
             }
@@ -392,7 +391,7 @@ impl Core {
         context: Arc<Context>,
         protocol: Protocol,
         codec: Box<dyn HttpCodec>,
-        server_name: &str,
+        server_name: String,
         tunnel_id: log_utils::IdChain<u64>,
     ) {
         let _metrics_guard = Metrics::client_sessions_counter(context.metrics.clone(), protocol);
@@ -400,9 +399,12 @@ impl Core {
         let authentication_policy =
             if server_name == context.settings.tunnel_tls_host_info.hostname {
                 tunnel::AuthenticationPolicy::Default
-            } else {
-                match context.settings.authenticator.authenticate(
-                    utils::scan_sni_authentication(server_name, &context.settings.tunnel_tls_host_info.hostname).unwrap(),
+            } else if let Some(auth) = &context.settings.authenticator {
+                match auth.authenticate(
+                    utils::scan_sni_authentication(
+                        &server_name,
+                        &context.settings.tunnel_tls_host_info.hostname,
+                    ).unwrap(),
                     &tunnel_id
                 ).await {
                     authentication::Status::Pass => tunnel::AuthenticationPolicy::Authenticated,
@@ -412,12 +414,14 @@ impl Core {
                     }
                     authentication::Status::TryThroughForwarder(x) => tunnel::AuthenticationPolicy::ThroughForwarder(x.clone()),
                 }
+            } else {
+                tunnel::AuthenticationPolicy::Default
             };
 
         log_id!(debug, tunnel_id, "New tunnel for client");
         let mut tunnel = Tunnel::new(
             context.clone(),
-            Box::new(HttpDownstream::new(context.settings.clone(), codec)),
+            Box::new(HttpDownstream::new(context.settings.clone(), codec, server_name)),
             Self::make_forwarder(context),
             authentication_policy,
             tunnel_id.clone(),

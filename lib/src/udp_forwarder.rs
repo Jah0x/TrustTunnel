@@ -12,10 +12,7 @@ use tokio::net::UdpSocket;
 use tokio::sync;
 use crate::{datagram_pipe, downstream, forwarder, log_id, log_utils, net_utils};
 use crate::net_utils::MAX_DATAGRAM_SIZE;
-use crate::settings::Settings;
 
-
-pub(crate) struct UdpForwarder {}
 
 struct Connection {
     socket: Arc<UdpSocket>,
@@ -51,40 +48,31 @@ enum PollStatus {
 }
 
 
-impl UdpForwarder {
-    pub fn new(
-        _core_settings: Arc<Settings>,
-    ) -> Self {
-        Self {
-        }
-    }
+pub(crate) fn make_multiplexer(
+    id: log_utils::IdChain<u64>
+) -> io::Result<(
+    Arc<dyn forwarder::UdpDatagramPipeShared>,
+    Box<dyn datagram_pipe::Source<Output = forwarder::UdpDatagramReadStatus>>,
+    Box<dyn datagram_pipe::Sink<Input = downstream::UdpDatagram>>,
+)> {
+    let shared = Arc::new(MultiplexerShared {
+        connections: Mutex::new(Default::default()),
+    });
+    let (wake_tx, wake_rx) = sync::mpsc::channel(1);
 
-    pub fn make_multiplexer(
-        &self, id: log_utils::IdChain<u64>
-    ) -> io::Result<(
-        Arc<dyn forwarder::UdpDatagramPipeShared>,
-        Box<dyn datagram_pipe::Source<Output = forwarder::UdpDatagramReadStatus>>,
-        Box<dyn datagram_pipe::Sink<Input = downstream::UdpDatagram>>,
-    )> {
-        let shared = Arc::new(MultiplexerShared {
-            connections: Mutex::new(Default::default()),
-        });
-        let (wake_tx, wake_rx) = sync::mpsc::channel(1);
-
-        Ok((
-            shared.clone(),
-            Box::new(MultiplexerSource {
-                shared: shared.clone(),
-                wake_rx,
-                pending_closures: Default::default(),
-                parent_id_chain: id.clone(),
-            }),
-            Box::new(MultiplexerSink {
-                shared,
-                wake_tx: Arc::new(wake_tx),
-            }),
-        ))
-    }
+    Ok((
+        shared.clone(),
+        Box::new(MultiplexerSource {
+            shared: shared.clone(),
+            wake_rx,
+            pending_closures: Default::default(),
+            parent_id_chain: id.clone(),
+        }),
+        Box::new(MultiplexerSink {
+            shared,
+            wake_tx: Arc::new(wake_tx),
+        }),
+    ))
 }
 
 async fn listen_socket_read(

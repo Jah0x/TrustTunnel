@@ -1,8 +1,10 @@
 use std::io;
 use std::io::ErrorKind;
+use std::net::Ipv4Addr;
 use std::sync::Arc;
 use bytes::{BufMut, BytesMut};
-use crate::{core, http1_codec, log_id, log_utils, pipe};
+use crate::{core, forwarder, http1_codec, log_id, log_utils, pipe, tunnel};
+use crate::forwarder::TcpConnector;
 use crate::http_codec::HttpCodec;
 use crate::net_utils::TcpDestination;
 use crate::pipe::DuplexPipe;
@@ -95,11 +97,20 @@ async fn establish_tunnel(
     };
     log_id!(trace, log_id, "Received request: {:?}", request.request());
 
-    let forwarder = TcpForwarder::new(context.settings.clone());
-    let (mut server_source, mut server_sink) = forwarder.connect_tcp(
+    let forwarder = Box::new(TcpForwarder::new(context.settings.clone()));
+    let (mut server_source, mut server_sink) = forwarder.connect(
         log_id.clone(),
-        TcpDestination::Address(context.settings.reverse_proxy.as_ref().unwrap().server_address)
-    )?.connect().await?;
+        forwarder::TcpConnectionMeta {
+            client_address: Ipv4Addr::UNSPECIFIED.into(),
+            destination: TcpDestination::Address(context.settings.reverse_proxy.as_ref().unwrap().server_address),
+            auth: None,
+            tls_domain: context.settings.reverse_proxy.as_ref().unwrap().tls_info.hostname.clone(),
+            user_agent: None,
+        },
+    ).await.map_err(|e| match e {
+        tunnel::ConnectionError::Io(e) => e,
+        _ => io::Error::new(ErrorKind::Other, format!("{}", e)),
+    })?;
 
     let mut request_headers = request.clone_request();
     let original_version = request_headers.version;
