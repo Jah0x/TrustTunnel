@@ -7,7 +7,7 @@ use vpn_libs_endpoint::core::Core;
 use vpn_libs_endpoint::settings::Settings;
 use vpn_libs_endpoint::shutdown::Shutdown;
 
-const VERSION_STRING: &str = "0.9.13";
+const VERSION_STRING: &str = "0.9.14";
 
 const VERSION_PARAM_NAME: &str = "v_e_r_s_i_o_n_do_not_change_this_name_it_will_break";
 const LOG_LEVEL_PARAM_NAME: &str = "log_level";
