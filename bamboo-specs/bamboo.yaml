@@ -3,4 +3,4 @@
 ---
   !include 'run-tests.yaml'
 ---
-  !include 'build-dist.yaml'
+  !include 'deploy.yaml'

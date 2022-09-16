@@ -5,7 +5,7 @@ triggers: [ ]
 plan:
   project-key: CL
   key: VLEBD
-  name: VpnLibsEndpoint - Build Distribution
+  name: VpnLibsEndpoint - Deploy
 
 stages:
   - Build artifacts:
@@ -14,16 +14,16 @@ stages:
       jobs:
         - Build on Linux
         - Build on macOS
-  - Build distribution:
+  - Deploy artifacts:
       manual: false
       final: false
       jobs:
-        - Build distribution
+        - Deploy artifacts
 
 Build on Linux:
   key: BL
   docker:
-    image: adguard/core-libs:latest
+    image: adguard/core-libs:1.9
     volumes:
       ${bamboo.working.directory}: ${bamboo.working.directory}
       ${bamboo.tmp.directory}: ${bamboo.tmp.directory}
@@ -73,8 +73,8 @@ Build on macOS:
       required: false
       shared: true
 
-Build distribution:
-  key: BD
+Deploy artifacts:
+  key: DA
   tasks:
     - checkout:
         description: Checkout Default Repository
@@ -85,7 +85,50 @@ Build distribution:
           - |-
             set -x -e
             VERSION=$(cat Cargo.toml | grep "version = " | head -n 1 | sed -e 's/version = "\(.*\)"/\1/')
-            zip vpn_endpoint-$VERSION.zip vpn-endpoint-build-results/*
+            ART_URL=${bamboo.artifactoryAdguardMavenUrl}
+            ART_VER=${VERSION}
+            
+            # Build
+            pushd vpn-endpoint-build-results
+            zip ../vpn_endpoint-$VERSION.zip *
+            popd
+            
+            # Tag release or change URL to snapshots
+            case "${bamboo_repository_branch_name}" in
+            master|stable-*)
+              git remote set-url origin ${bamboo_planRepository_repositoryUrl}
+              git reset
+              git tag v$VERSION || true
+              git push origin v$VERSION
+            *)
+              ART_VER="${ART_VER}-snapshot"
+              ART_URL=${bamboo.artifactoryAdguardMavenSnapshotsUrl}
+            esac
+            
+            # Deploy to Maven
+            cat > settings.xml <<EOF
+            <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                                    https://maven.apache.org/xsd/settings-1.0.0.xsd">
+              <servers>
+                <server>
+                  <id>Artifactory</id>
+                    <username>${bamboo.artifactoryUser}</username>
+                    <password>${bamboo.artifactoryPassword}</password>
+                </server>
+              </servers>
+            </settings>
+            EOF
+            mvn --settings settings.xml deploy:deploy-file \
+              -DgroupId=com.adguard.corelibs \
+              -DartifactId=vpn-libs-endpoint \
+              -Dversion=$ART_VER \
+              -Dpackaging=zip \
+              -Dfile=vpn_endpoint-${VERSION}.zip \
+              -DrepositoryId=Artifactory \
+              -Durl=$ART_URL
+            rm settings.xml
   requirements:
     - macOS 11.0 or later
   artifact-subscriptions:

@@ -15,9 +15,9 @@ stages:
         - Test on macOS
 
 Test on Linux:
-  key: BL
+  key: TL
   docker:
-    image: adguard/core-libs:latest
+    image: adguard/core-libs:1.9
     volumes:
       ${bamboo.working.directory}: ${bamboo.working.directory}
       ${bamboo.tmp.directory}: ${bamboo.tmp.directory}
@@ -40,7 +40,7 @@ Test on Linux:
   artifact-subscriptions: [ ]
 
 Test on macOS:
-  key: BM
+  key: TM
   tasks:
     - checkout:
         description: Checkout Default Repository
