@@ -39,6 +39,7 @@ Build on Linux:
         interpreter: SHELL
         scripts:
           - |-
+            #!/bin/bash
             set -x -e
             cargo build --release --target x86_64-unknown-linux-gnu
             cp target/x86_64-unknown-linux-gnu/release/vpn_endpoint target/vpn_endpoint.linux-x86_64
@@ -62,6 +63,7 @@ Build on macOS:
         interpreter: SHELL
         scripts:
           - |-
+            #!/bin/bash
             set -x -e
             cargo build --release --target x86_64-apple-darwin
             cp target/x86_64-apple-darwin/release/vpn_endpoint target/vpn_endpoint.macos-x86_64
@@ -93,6 +95,8 @@ Deploy artifacts:
         interpreter: SHELL
         scripts:
           - |-
+            #!/bin/bash
+            
             set -x -e
             VERSION=$(cat Cargo.toml | grep "version = " | head -n 1 | sed -e 's/version = "\(.*\)"/\1/')
             ART_URL=${bamboo.artifactoryAdguardMavenUrl}
