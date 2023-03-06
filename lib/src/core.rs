@@ -1,6 +1,6 @@
 use std::io;
 use std::io::ErrorKind;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UdpSocket};
@@ -41,7 +41,7 @@ pub struct Core {
 
 pub(crate) struct Context {
     pub settings: Arc<Settings>,
-    tls_demux: Arc<TlsDemux>,
+    tls_demux: Arc<RwLock<TlsDemux>>,
     pub icmp_forwarder: Option<Arc<IcmpForwarder>>,
     pub shutdown: Arc<Mutex<Shutdown>>,
     pub metrics: Arc<Metrics>,
@@ -52,10 +52,14 @@ pub(crate) struct Context {
 impl Core {
     pub fn new(
         mut settings: Settings,
+        tls_hosts_settings: settings::TlsHostsSettings,
         shutdown: Arc<Mutex<Shutdown>>,
     ) -> Result<Self, Error> {
         if !settings.is_built() {
             settings.validate().map_err(Error::SettingsValidation)?;
+        }
+        if !tls_hosts_settings.is_built() {
+            tls_hosts_settings.validate().map_err(Error::SettingsValidation)?;
         }
 
         if settings.authenticator.is_none()
@@ -69,8 +73,10 @@ impl Core {
         Ok(Self {
             context: Arc::new(Context {
                 settings: settings.clone(),
-                tls_demux: Arc::new(TlsDemux::new(settings.clone())
-                    .map_err(|e| Error::TlsDemultiplexer(e.to_string()))?),
+                tls_demux: Arc::new(RwLock::new(
+                    TlsDemux::new(&settings, &tls_hosts_settings)
+                        .map_err(|e| Error::TlsDemultiplexer(e.to_string()))?
+                )),
                 icmp_forwarder: if settings.icmp.is_none() {
                     None
                 } else {
@@ -126,6 +132,21 @@ impl Core {
                 listen_metrics,
             ) => x.map(|_| ()),
         }
+    }
+
+    /// Reload the TLS hosts settings
+    pub fn reload_tls_hosts_settings(&self, settings: settings::TlsHostsSettings) -> io::Result<()> {
+        let mut demux = self.context.tls_demux.write().unwrap();
+
+        if !settings.is_built() {
+            settings.validate()
+                .map_err(|e| io::Error::new(
+                    ErrorKind::Other, format!("Settings validation failure: {:?}", e)
+                ))?;
+        }
+
+        *demux = TlsDemux::new(&self.context.settings, &settings)?;
+        Ok(())
     }
 
     async fn listen_tcp(&self) -> io::Result<()> {
@@ -240,7 +261,7 @@ impl Core {
 
         let core_settings = context.settings.clone();
         let tls_connection_meta =
-            match context.tls_demux.select(acceptor.alpn().iter().map(Vec::as_slice), sni) {
+            match context.tls_demux.read().unwrap().select(acceptor.alpn().iter().map(Vec::as_slice), sni) {
                 Ok(x) if x.protocol == tls_demultiplexer::Protocol::Http3 =>
                     return Err((client_id, format!("Dropping connection due to unexpected protocol: {:?}", x))),
                 Ok(x) => x,
@@ -441,7 +462,9 @@ impl Default for Context {
         let settings = Arc::new(Settings::default());
         Self {
             settings: settings.clone(),
-            tls_demux: Arc::new(TlsDemux::new(settings).unwrap()),
+            tls_demux: Arc::new(RwLock::new(
+                TlsDemux::new(&settings, &settings::TlsHostsSettings::default()).unwrap()
+            )),
             icmp_forwarder: None,
             shutdown: Shutdown::new(),
             metrics: Metrics::new().unwrap(),

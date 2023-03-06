@@ -4,6 +4,7 @@ FROM bench-common
 ARG ENDPOINT_DIR="vpn-libs-endpoint"
 ARG ENDPOINT_HOSTNAME="endpoint.bench"
 ARG CONFIG_FILE="vpn.conf"
+ARG TLS_HOSTS_SETTINGS_FILE="tls_hosts.conf"
 ARG LOG_LEVEL="info"
 
 RUN apt install -y openssl
@@ -22,11 +23,6 @@ RUN cd "$ENDPOINT_DIR" && \
 
 RUN echo "{\n\
   \"listen_address\": \"[::]:4433\",\n\
-  \"tunnel_tls_host_info\": {\n\
-    \"hostname\": \"$ENDPOINT_HOSTNAME\",\n\
-    \"cert_chain_path\": \"cert.pem\",\n\
-    \"private_key_path\": \"key.pem\"\n\
-  },\n\
   \"allow_private_network_connections\": true,\n\
   \"listen_protocols\": [\n\
     {\n\
@@ -41,7 +37,18 @@ RUN echo "{\n\
   ]\n\
 }" >>$CONFIG_FILE
 
+RUN echo "{\n\
+  \"tunnel_hosts\": [\n\
+    {\n\
+      \"hostname\": \"$ENDPOINT_HOSTNAME\",\n\
+      \"cert_chain_path\": \"cert.pem\",\n\
+      \"private_key_path\": \"key.pem\"\n\
+    }\n\
+  ]\n\
+}" >>$TLS_HOSTS_SETTINGS_FILE
+
 ENV LOG_LEVEL=$LOG_LEVEL \
     CONFIG_FILE=$CONFIG_FILE \
+    TLS_HOSTS_SETTINGS_FILE=$TLS_HOSTS_SETTINGS_FILE \
     RUST_BACKTRACE=1
-ENTRYPOINT ./vpn_endpoint -l "$LOG_LEVEL" "$CONFIG_FILE" >>/tmp/vpn.log 2>&1
+ENTRYPOINT ./vpn_endpoint -l "$LOG_LEVEL" "$CONFIG_FILE" "$TLS_HOSTS_SETTINGS_FILE" >>/tmp/vpn.log 2>&1

@@ -2,8 +2,11 @@ mod logging;
 
 use std::fs::File;
 use std::io::BufReader;
-use log::{info, LevelFilter};
+use std::sync::Arc;
+use log::{error, info, LevelFilter};
+use tokio::signal;
 use vpn_libs_endpoint::core::Core;
+use vpn_libs_endpoint::settings;
 use vpn_libs_endpoint::settings::Settings;
 use vpn_libs_endpoint::shutdown::Shutdown;
 
@@ -12,7 +15,8 @@ const VERSION_STRING: &str = env!("CARGO_PKG_VERSION");
 const VERSION_PARAM_NAME: &str = "v_e_r_s_i_o_n_do_not_change_this_name_it_will_break";
 const LOG_LEVEL_PARAM_NAME: &str = "log_level";
 const LOG_FILE_PARAM_NAME: &str = "log_file";
-const CONFIG_PARAM_NAME: &str = "config";
+const SETTINGS_PARAM_NAME: &str = "settings";
+const TLS_HOSTS_SETTINGS_PARAM_NAME: &str = "tls_hosts_settings";
 const SENTRY_DSN_PARAM_NAME: &str = "sentry_dsn";
 const THREADS_NUM_PARAM_NAME: &str = "threads_num";
 
@@ -48,10 +52,14 @@ fn main() {
                 .action(clap::ArgAction::Set)
                 .value_parser(clap::value_parser!(usize))
                 .help("The number of worker threads. If not specified, set to the number of CPUs on the machine."),
-            clap::Arg::new(CONFIG_PARAM_NAME)
+            clap::Arg::new(SETTINGS_PARAM_NAME)
                 .action(clap::ArgAction::Set)
                 .required_unless_present(VERSION_PARAM_NAME)
-                .help("Path to a configuration file"),
+                .help("Path to a settings file"),
+            clap::Arg::new(TLS_HOSTS_SETTINGS_PARAM_NAME)
+                .action(clap::ArgAction::Set)
+                .required_unless_present(VERSION_PARAM_NAME)
+                .help("Path to a file containing TLS hosts settings. Sending SIGHUP to the process causes reloading the settings."),
         ])
         .disable_version_flag(true)
         .get_matches();
@@ -90,10 +98,15 @@ fn main() {
         Some(x) => panic!("Unexpected log level: {}", x),
     });
 
-    let config_path = args.get_one::<String>(CONFIG_PARAM_NAME).unwrap();
-    let parsed: Settings = serde_json::from_reader(BufReader::new(
-        File::open(config_path).expect("Couldn't open the configuration file")
-    )).expect("Failed parsing the configuration file");
+    let settings_path = args.get_one::<String>(SETTINGS_PARAM_NAME).unwrap();
+    let settings: Settings = serde_json::from_reader(BufReader::new(
+        File::open(settings_path).expect("Couldn't open the settings file")
+    )).expect("Couldn't parse the settings file");
+
+    let tls_hosts_settings_path = args.get_one::<String>(TLS_HOSTS_SETTINGS_PARAM_NAME).unwrap();
+    let tls_hosts_settings: settings::TlsHostsSettings = serde_json::from_reader(BufReader::new(
+        File::open(tls_hosts_settings_path).expect("Couldn't open the TLS hosts settings file")
+    )).expect("Couldn't parse the TLS hosts settings file");
 
     let rt = {
         let mut builder = tokio::runtime::Builder::new_multi_thread();
@@ -109,10 +122,37 @@ fn main() {
     };
 
     let shutdown = Shutdown::new();
-    let core = Core::new(parsed, shutdown.clone()).expect("Couldn't create core instance");
+    let core = Arc::new(Core::new(
+        settings, tls_hosts_settings, shutdown.clone(),
+    ).expect("Couldn't create core instance"));
 
-    let listen_task = async move {
-        core.listen().await
+    let listen_task = {
+        let core = core.clone();
+        async move {
+            core.listen().await
+        }
+    };
+
+    let reload_tls_hosts_task = {
+        let tls_hosts_settings_path = tls_hosts_settings_path.clone();
+        async move {
+            let mut sighup_listener = signal::unix::signal(signal::unix::SignalKind::hangup())
+                .expect("Couldn't start SIGHUP listener");
+
+            loop {
+                sighup_listener.recv().await;
+                info!("Reloading TLS hosts settings");
+
+                let tls_hosts_settings: settings::TlsHostsSettings = serde_json::from_reader(BufReader::new(
+                    File::open(&tls_hosts_settings_path).expect("Couldn't open the TLS hosts settings file")
+                )).expect("Couldn't parse the TLS hosts settings file");
+
+                core.reload_tls_hosts_settings(tls_hosts_settings).expect("Couldn't apply new settings");
+                info!("TLS hosts settings are successfully reloaded");
+            }
+
+            () // Needed for type deduction
+        }
     };
 
     let interrupt_task = async move {
@@ -124,6 +164,7 @@ fn main() {
     rt.block_on(async move {
         tokio::select! {
             listen_result = listen_task => listen_result.expect("Error while listening IO events"),
+            _ = reload_tls_hosts_task => error!("Error while reloading TLS hosts"),
             _ = interrupt_task => info!("Interrupted by user"),
         }
     });

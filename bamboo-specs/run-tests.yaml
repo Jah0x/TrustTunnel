@@ -32,9 +32,7 @@ Test on Linux:
         scripts:
           - |-
             set -x -e
-            cargo test
-            cd lib
-            cargo test
+            cargo test --workspace
   requirements:
     - adg-privileged-docker
   artifact-subscriptions: [ ]
@@ -50,9 +48,7 @@ Test on macOS:
         scripts:
           - |-
             set -x -e
-            cargo test --target x86_64-apple-darwin
-            cd lib
-            cargo test --target x86_64-apple-darwin
+            cargo test --workspace --target x86_64-apple-darwin
   requirements:
     - macOS 11.0 or later
   artifact-subscriptions: [ ]

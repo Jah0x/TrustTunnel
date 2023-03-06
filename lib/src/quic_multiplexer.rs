@@ -37,7 +37,7 @@ pub(crate) struct QuicMultiplexer {
     connections: HashMap<quiche::ConnectionId<'static>, Connection>,
     deadlines: HashMap<quiche::ConnectionId<'static>, Instant>,
     closest_deadline: Option<Instant>,
-    tls_demux: Arc<TlsDemux>,
+    tls_demux: Arc<std::sync::RwLock<TlsDemux>>,
     token_prefix: [u8; TOKEN_PREFIX_SIZE],
     id: log_utils::IdChain<u64>,
     next_socket_id: Arc<AtomicU64>,
@@ -108,7 +108,7 @@ impl QuicMultiplexer {
     pub fn new(
         core_settings: Arc<Settings>,
         socket: UdpSocket,
-        tls_demux: Arc<TlsDemux>,
+        tls_demux: Arc<std::sync::RwLock<TlsDemux>>,
         next_socket_id: Arc<AtomicU64>,
     ) -> Self {
         let queue_cap = core_settings.listen_protocols.iter()
@@ -420,26 +420,23 @@ impl QuicMultiplexer {
             // in case we should retry as another host
             let mut retry_buffer = packet.to_vec();
 
-            // There is no API method to get SNI from the client hello before accepting
-            // the connection. So try accepting it with the first certificate and change
-            // the server certificate afterwards if needed.
-            let tls_host = self.core_settings.tunnel_tls_hosts.get(0).unwrap();
+            let bootstrap_meta = self.tls_demux.read().unwrap().get_quic_connection_bootstrap_meta();
             // Reuse the source connection ID we sent in the Retry packet, instead of changing it again
             let quic_conn = self.accept_quic_connection(
-                &tls_host.cert_chain_path,
-                &tls_host.private_key_path,
+                bootstrap_meta.cert_chain_path.as_str(),
+                bootstrap_meta.key_path.as_str(),
                 &header.dcid,
                 Some(&odcid),
                 peer,
                 packet,
             )?;
 
-            let tls_connection_meta = self.tls_demux.select(
+            let tls_connection_meta = self.tls_demux.read().unwrap().select(
                 std::iter::once(tls_demultiplexer::Protocol::Http3.as_alpn().as_bytes()),
                 quic_conn.server_name().map(String::from).unwrap_or_default(),
             ).map_err(|message| io::Error::new(ErrorKind::Other, message))?;
 
-            let quic_conn = if Some(tls_host.hostname.as_str()) == quic_conn.server_name() {
+            let quic_conn = if Some(bootstrap_meta.sni.as_str()) == quic_conn.server_name() {
                 quic_conn
             } else {
                 self.accept_quic_connection(

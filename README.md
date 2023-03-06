@@ -25,8 +25,7 @@ where
 
 ### Library configuration
 
-An endpoint can be configured using a JSON file. The file struct reflects the library settings
-(see `struct Settings` in [settings.rs](./lib/src/settings.rs)).
+An endpoint can be configured using a couple of JSON files.
 For a detailed description of the features see [here](./lib/README.md#features-description).
 The very basic configuration file can be found in [the example](#example-endpoint).
 
@@ -38,52 +37,14 @@ The full set of settings is shown bellow in the pseudo-json format:
   `"authenticator": { "file": { "path": "/creds.txt" } }` as well as
   `"authenticator": { "radius": { "address": "127.0.0.1:1813" } }`
 
+#### Settings
+
+The file struct reflects the library settings (`struct Settings` in [settings.rs](./lib/src/settings.rs)).
+
 ```
 {
   /// The address to listen on
   "listen_address": Default("0.0.0.0:433"),
-  /// The TLS hosts for traffic tunneling.
-  /// The host names MUST differ from the pinging, speed testing and reverse proxy hosts.
-  "tunnel_tls_hosts": [
-    {
-      "hostname": "localhost",
-      /// Path to a file containing the certificate chain
-      "cert_chain_path": "cert.pem",
-      /// Path to a file containing the private key.
-      /// May be equal to `cert_chain_path` if it contains both of them.
-      "private_key_path": "key.pem"
-    },
-    ...
-  ],
-  /// The TLS hosts for HTTPS pinging.
-  /// With this one set up the endpoint responds with `200 OK` to HTTPS `GET` requests
-  /// to the specified domains.
-  /// The host names MUST differ from the tunneling, speed testing and reverse proxy hosts.
-  "ping_tls_hosts": [
-    {
-      "hostname": "ping.localhost",
-      "cert_chain_path": "cert.pem",
-      "private_key_path": "key.pem"
-    },
-    ...
-  ],
-  /// The TLS hosts for speed testing.
-  /// With this one set up the endpoint accepts connections to the specified hosts and
-  /// handles HTTP requests in the following way:
-  ///     * `GET` requests with `/Nmb.bin` path (where `N` is 1 to 100, e.g. `/100mb.bin`)
-  ///       are considered as download speedtest transferring `N` megabytes to a client
-  ///     * `POST` requests with `/upload.html` path and `Content-Length: N`
-  ///       are considered as upload speedtest receiving `N` bytes from a client,
-  ///       where `N` is up to 120 * 1024 * 1024 bytes
-  /// The host names MUST differ from the tunneling, pinging and reverse proxy hosts.
-  "speed_tls_hosts": [
-    {
-      "hostname": "speed.localhost",
-      "cert_chain_path": "cert.pem",
-      "private_key_path": "key.pem"
-    },
-    ...
-  ],
   /// The reverse proxy settings.
   /// With this one set up the endpoint does TLS termination on such connections and
   /// translates HTTP/x traffic into HTTP/1.1 protocol towards the server and back
@@ -93,19 +54,10 @@ The full set of settings is shown bellow in the pseudo-json format:
   ///
   /// The translated HTTP/1.1 requests have the custom header `X-Original-Protocol`
   /// appended. For now, its value can be either `HTTP1`, or `HTTP3`.
+  /// TLS hosts for the reverse proxy channel are configured through the TLS hosts settings.
   "reverse_proxy": Optional {
     /// The origin server address
     "server_address": "127.0.0.1:1111",
-    /// The TLS hosts info.
-    /// The host names MUST differ from the tunneling, HTTPS pinging and speed testing hosts.
-    "tls_hosts": [
-      {
-        "hostname": "hello.localhost",
-        "cert_chain_path": "cert.pem",
-        "private_key_path": "key.pem"
-      },
-      ...
-    ],
     /// The connection timeout
     "connection_timeout_secs": Default(30),
     /// With this one set to `true` the endpoint overrides the HTTP method while
@@ -234,7 +186,72 @@ The full set of settings is shown bellow in the pseudo-json format:
 }
 ```
 
-### Executable configuration
+#### TlsHostsSettings
+
+The file struct reflects the library settings (`struct TlsHostsSettings` in [settings.rs](./lib/src/settings.rs)).
+These settings may be reloaded dynamically (see [here](#dynamic-reloading-of-tls-hosts-settings) for details).
+
+```
+{
+  /// The TLS hosts for traffic tunneling
+  "tunnel_hosts": [
+    {
+      /// Used as a key for selecting a certificate chain in TLS handshake.
+      /// MUST be unique.
+      "hostname": "localhost",
+      /// Path to a file containing the certificate chain.
+      /// MUST remain valid until the endpoint is running or the next TLS hosts settings reload.
+      "cert_chain_path": "cert.pem",
+      /// Path to a file containing the private key.
+      /// May be equal to `cert_chain_path` if it contains both of them.
+      /// MUST remain valid until the endpoint is running or the next TLS hosts settings reload.
+      "private_key_path": "key.pem"
+    },
+    ...
+  ],
+  /// The TLS hosts for HTTPS pinging.
+  /// With this one set up the endpoint responds with `200 OK` to HTTPS `GET` requests
+  /// to the specified domains.
+  "ping_hosts": [
+    {
+      "hostname": "ping.localhost",
+      "cert_chain_path": "cert.pem",
+      "private_key_path": "key.pem"
+    },
+    ...
+  ],
+  /// The TLS hosts for speed testing.
+  /// With this one set up the endpoint accepts connections to the specified hosts and
+  /// handles HTTP requests in the following way:
+  ///     * `GET` requests with `/Nmb.bin` path (where `N` is 1 to 100, e.g. `/100mb.bin`)
+  ///       are considered as download speedtest transferring `N` megabytes to a client
+  ///     * `POST` requests with `/upload.html` path and `Content-Length: N`
+  ///       are considered as upload speedtest receiving `N` bytes from a client,
+  ///       where `N` is up to 120 * 1024 * 1024 bytes
+  "speedtest_hosts": [
+    {
+      "hostname": "speed.localhost",
+      "cert_chain_path": "cert.pem",
+      "private_key_path": "key.pem"
+    },
+    ...
+  ],
+  /// The TLS hosts for the connections must be forwarded to the reverse proxy. 
+  /// Only makes sense if the reverse proxy is set up, otherwise it is ignored.
+  "reverse_proxy_hosts": [
+    {
+      "hostname": "reverse.proxy.localhost",
+      "cert_chain_path": "cert.pem",
+      "private_key_path": "key.pem"
+    },
+    ...
+  ]
+}
+```
+
+### Executable features
+
+#### Configuration
 
 Some options reside on the application level. Such options can be configured via command
 line arguments. For example:
@@ -250,16 +267,25 @@ To see the full set of available options, execute the following commands in Term
 <path/to/target>/vpn_endpoint -h
 ```
 
+#### Dynamic reloading of TLS hosts settings
+
+The executable is able to reload TLS hosts settings dynamically. To trigger this, send the SIGHUP signal
+to the process. After receiving, it reparses the TLS hosts settings file that was passed in arguments and
+applies the new settings.
+
+**IMPORTANT:** the file paths passed through the settings must remain valid until the process exit or until
+the next reloading.
+
 ## Running
 
 To run the binary through `cargo`, execute the following commands in Terminal:
 ```shell
-cargo run --bin vpn_endpoint -- <path/to/vpn.config>
+cargo run --bin vpn_endpoint -- <path/to/vpn.config> <path/to/tls_hosts.config>
 ```
 
 To run the binary directly, execute the following commands in Terminal:
 ```shell
-<path/to/target>/vpn_endpoint <path/to/vpn.config>
+<path/to/target>/vpn_endpoint <path/to/vpn.config> <path/to/tls_hosts.config>
 ```
 where `<path/to/target>` is determined by the build command (by default it is `./target/debug` or
 `./target/release` depending on the build type).

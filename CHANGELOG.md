@@ -1,5 +1,20 @@
 # CHANGELOG
 
+* Added support for dynamic reloading of TLS hosts settings.  
+  API changes in the library:
+    * `tunnel_tls_hosts`, `ping_tls_hosts` and `speed_tls_hosts` from `settings::Settings`,
+      and `tls_hosts` from `settings::ReverseProxySettings` were extracted into a dedicated
+      structure `settings::TlsHostsSettings`
+    * Added a new method for the reloading settings: `core::Core::reload_tls_hosts_settings()`
+
+  The executable related changes:
+    * The TLS hosts settings must be passed as a separate argument (see [here](./README.md#running) for details)
+    * The new settings file structures are described [here](./README.md#library-configuration)
+    * The executable is now handling the SIGHUP signal to trigger the reloading
+      (see [here](./README.md#dynamic-reloading-of-tls-hosts-settings) for details)
+
+## 0.9.29
+
 * Removed blocking `core::Core::listen()` method. The library user must now set up a tokio runtime itself.  
   The library API changes:
   * Removed `core::Core::listen()`

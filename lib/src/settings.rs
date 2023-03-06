@@ -54,26 +54,7 @@ pub struct Settings {
     /// The address to listen on
     #[serde(default = "Settings::default_listen_address")]
     pub(crate) listen_address: SocketAddr,
-    /// The TLS hosts for traffic tunneling.
-    /// The host names MUST differ from the pinging, speed testing and reverse proxy hosts.
-    pub(crate) tunnel_tls_hosts: Vec<TlsHostInfo>,
-    /// The TLS hosts for HTTPS pinging.
-    /// With this one set up the endpoint responds with `200 OK` to HTTPS `GET` requests
-    /// to the specified domains.
-    /// The host names MUST differ from the tunneling, speed testing and reverse proxy hosts.
-    pub(crate) ping_tls_hosts: Vec<TlsHostInfo>,
-    /// The TLS hosts for speed testing.
-    /// With this one set up the endpoint accepts connections to the specified hosts and
-    /// handles HTTP requests in the following way:
-    ///     * `GET` requests with `/Nmb.bin` path (where `N` is 1 to 100, e.g. `/100mb.bin`)
-    ///       are considered as download speedtest transferring `N` megabytes to a client
-    ///     * `POST` requests with `/upload.html` path and `Content-Length: N`
-    ///       are considered as upload speedtest receiving `N` bytes from a client,
-    ///       where `N` is up to 120 * 1024 * 1024 bytes
-    /// The host names MUST differ from the tunneling, pinging and reverse proxy hosts.
-    pub(crate) speed_tls_hosts: Vec<TlsHostInfo>,
-    /// The reverse proxy settings.
-    /// See [`SettingsBuilder::reverse_proxy`] for detailed description.
+    /// See [`SettingsBuilder::reverse_proxy`]
     pub(crate) reverse_proxy: Option<ReverseProxySettings>,
     /// IPv6 availability
     #[serde(default = "Settings::default_ipv6_available")]
@@ -130,24 +111,51 @@ pub struct Settings {
 
 #[derive(Default, Deserialize)]
 pub struct TlsHostInfo {
-    /// Used as a key for selecting a certificate chain in TLS handshake
+    /// Used as a key for selecting a certificate chain in TLS handshake.
+    /// MUST be unique.
     pub hostname: String,
-    /// Path to a file containing the certificate chain
+    /// Path to a file containing the certificate chain.
+    /// MUST remain valid until [`crate::core::Core::listen()`] or
+    /// [`crate::core::Core::listen_async()`] is running, or
+    /// until the next [`crate::core::Core::reload_tls_hosts_settings()`] call.
     #[serde(deserialize_with = "deserialize_file_path")]
     pub cert_chain_path: String,
     /// Path to a file containing the private key.
     /// May be equal to `cert_chain_path` if it contains both of them.
+    /// MUST remain valid until [`crate::core::Core::listen()`] or
+    /// [`crate::core::Core::listen_async()`] is running, or
+    /// until the next [`crate::core::Core::reload_tls_hosts_settings()`] call.
     #[serde(deserialize_with = "deserialize_file_path")]
     pub private_key_path: String,
+}
+
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(Default))]
+pub struct TlsHostsSettings {
+    /// See [`TlsSettingsBuilder::tunnel_hosts`]
+    pub(crate) tunnel_hosts: Vec<TlsHostInfo>,
+    /// See [`TlsSettingsBuilder::ping_hosts`]
+    #[serde(default)]
+    pub(crate) ping_hosts: Vec<TlsHostInfo>,
+    /// See [`TlsSettingsBuilder::speedtest_hosts`]
+    #[serde(default)]
+    pub(crate) speedtest_hosts: Vec<TlsHostInfo>,
+    /// See [`TlsSettingsBuilder::reverse_proxy_hosts`]
+    #[serde(default)]
+    pub(crate) reverse_proxy_hosts: Vec<TlsHostInfo>,
+
+    /// Whether an instance was built through a [`TlsSettingsBuilder`].
+    /// This flag is a workaround for absence of the ability to validate
+    /// the deserialized structure.
+    /// https://github.com/serde-rs/serde/issues/642
+    #[serde(skip)]
+    built: bool,
 }
 
 #[derive(Deserialize)]
 pub struct ReverseProxySettings {
     /// The origin server address
     pub server_address: SocketAddr,
-    /// The TLS hosts info.
-    /// The host names MUST differ from the tunneling, HTTPS pinging and speed testing hosts.
-    pub tls_hosts: Vec<TlsHostInfo>,
     /// The connection timeout
     #[serde(default = "Settings::default_tcp_connections_timeout")]
     #[serde(rename(deserialize = "connection_timeout_secs"))]
@@ -340,6 +348,10 @@ pub struct SettingsBuilder {
     authenticator: Option<Box<dyn Authenticator>>,
 }
 
+pub struct TlsSettingsBuilder {
+    settings: TlsHostsSettings,
+}
+
 pub struct Http1SettingsBuilder {
     settings: Http1Settings,
 }
@@ -373,44 +385,10 @@ impl Settings {
         self.built
     }
 
-    fn validate_tls_hosts<'a, Iter>(hosts: Iter, mut unique_hosts: HashSet<&'a str>)
-                                    -> Result<HashSet<&'a str>, String>
-        where Iter: Iterator<Item=&'a TlsHostInfo>
-    {
-        for h in hosts {
-            utils::load_certs(&h.cert_chain_path)
-                .map_err(|e| format!(
-                    "Invalid cert chain: path='{}', error='{}'", h.cert_chain_path, e
-                ))?;
-
-            utils::load_private_key(&h.private_key_path)
-                .map_err(|e| format!(
-                    "Invalid key: path='{}', error='{}'", h.private_key_path, e
-                ))?;
-
-            if !unique_hosts.insert(&h.hostname) {
-                return Err(format!("Hostname must be unique: {}", h.hostname));
-            }
-        }
-
-        Ok(unique_hosts)
-    }
-
     pub(crate) fn validate(&self) -> Result<(), ValidationError> {
         if self.listen_address.ip().is_unspecified() && self.listen_address.port() == 0 {
             return Err(ValidationError::ListenAddress("Not set".to_string()));
         }
-
-        if self.tunnel_tls_hosts.is_empty() {
-            return Err(ValidationError::TunnelTlsHostInfo("Not set".to_string()));
-        }
-
-        let hosts = Self::validate_tls_hosts(self.tunnel_tls_hosts.iter(), HashSet::new())
-            .map_err(ValidationError::TunnelTlsHostInfo)?;
-        let hosts = Self::validate_tls_hosts(self.ping_tls_hosts.iter(), hosts)
-            .map_err(ValidationError::PingTlsHostInfo)?;
-        let hosts = Self::validate_tls_hosts(self.speed_tls_hosts.iter(), hosts)
-            .map_err(ValidationError::SpeedTlsHostInfo)?;
 
         if let Some(x) = &self.reverse_proxy {
             if x.server_address.ip().is_unspecified() && x.server_address.port() == 0 {
@@ -418,9 +396,6 @@ impl Settings {
                     "Invalid origin server address".into()
                 ));
             }
-
-            Self::validate_tls_hosts(x.tls_hosts.iter(), hosts)
-                .map_err(ValidationError::ReverseProxy)?;
         }
 
         if self.listen_protocols.is_empty() {
@@ -464,9 +439,6 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             listen_address: SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)),
-            tunnel_tls_hosts: Default::default(),
-            ping_tls_hosts: Default::default(),
-            speed_tls_hosts: Default::default(),
             reverse_proxy: None,
             ipv6_available: false,
             allow_private_network_connections: true,
@@ -485,6 +457,56 @@ impl Default for Settings {
             metrics: Default::default(),
             built: false,
         }
+    }
+}
+
+impl TlsHostsSettings {
+    pub fn builder() -> TlsSettingsBuilder {
+        TlsSettingsBuilder::new()
+    }
+
+    pub(crate) fn is_built(&self) -> bool {
+        self.built
+    }
+
+    fn validate_tls_hosts<'a, Iter>(hosts: Iter, mut unique_hosts: HashSet<&'a str>)
+                                    -> Result<HashSet<&'a str>, String>
+        where Iter: Iterator<Item=&'a TlsHostInfo>
+    {
+        for h in hosts {
+            utils::load_certs(&h.cert_chain_path)
+                .map_err(|e| format!(
+                    "Invalid cert chain: path='{}', error='{}'", h.cert_chain_path, e
+                ))?;
+
+            utils::load_private_key(&h.private_key_path)
+                .map_err(|e| format!(
+                    "Invalid key: path='{}', error='{}'", h.private_key_path, e
+                ))?;
+
+            if !unique_hosts.insert(&h.hostname) {
+                return Err(format!("Hostname must be unique: {}", h.hostname));
+            }
+        }
+
+        Ok(unique_hosts)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ValidationError> {
+        if self.tunnel_hosts.is_empty() {
+            return Err(ValidationError::TunnelTlsHostInfo("Not set".to_string()));
+        }
+
+        let hosts = Self::validate_tls_hosts(self.tunnel_hosts.iter(), HashSet::new())
+            .map_err(ValidationError::TunnelTlsHostInfo)?;
+        let hosts = Self::validate_tls_hosts(self.ping_hosts.iter(), hosts)
+            .map_err(ValidationError::PingTlsHostInfo)?;
+        let hosts = Self::validate_tls_hosts(self.speedtest_hosts.iter(), hosts)
+            .map_err(ValidationError::SpeedTlsHostInfo)?;
+        Self::validate_tls_hosts(self.reverse_proxy_hosts.iter(), hosts)
+            .map_err(ValidationError::ReverseProxy)?;
+
+        Ok(())
     }
 }
 
@@ -648,9 +670,6 @@ impl SettingsBuilder {
         Self {
             settings: Settings {
                 listen_address: Settings::default_listen_address(),
-                tunnel_tls_hosts: Default::default(),
-                ping_tls_hosts: Default::default(),
-                speed_tls_hosts: Default::default(),
                 reverse_proxy: None,
                 ipv6_available: Settings::default_ipv6_available(),
                 allow_private_network_connections: Settings::default_allow_private_network_connections(),
@@ -684,21 +703,6 @@ impl SettingsBuilder {
         Ok(self)
     }
 
-    /// Set the TLS hosts for traffic tunneling
-    pub fn tunnel_tls_hosts(mut self, hosts: Vec<TlsHostInfo>) -> Self {
-        self.settings.tunnel_tls_hosts = hosts;
-        self
-    }
-
-    /// Set the TLS hosts for HTTPS pinging.
-    /// With this one set up the endpoint responds with `200 OK` to HTTPS `GET` requests
-    /// to the specified domains.
-    /// The host names MUST differ from the tunneling host and reverse proxy ones.
-    pub fn ping_tls_hosts(mut self, hosts: Vec<TlsHostInfo>) -> Self {
-        self.settings.ping_tls_hosts = hosts;
-        self
-    }
-
     /// Set the reverse proxy settings.
     /// With this one set up the endpoint does TLS termination on such connections and
     /// translates HTTP/x traffic into HTTP/1.1 protocol towards the server and back
@@ -708,6 +712,7 @@ impl SettingsBuilder {
     ///
     /// The translated HTTP/1.1 requests have the custom header `X-Original-Protocol`
     /// appended. For now, its value can be either `HTTP1`, or `HTTP3`.
+    /// TLS hosts for the reverse proxy channel are configured through [`TlsHostsSettings`].
     pub fn reverse_proxy(mut self, settings: ReverseProxySettings) -> Self {
         self.settings.reverse_proxy = Some(settings);
         self
@@ -770,6 +775,61 @@ impl SettingsBuilder {
     /// Set the ICMP forwarder settings
     pub fn icmp(mut self, x: IcmpSettings) -> Self {
         self.settings.icmp = Some(x);
+        self
+    }
+}
+
+impl TlsSettingsBuilder {
+    fn new() -> Self {
+        Self {
+            settings: TlsHostsSettings {
+                tunnel_hosts: Default::default(),
+                ping_hosts: Default::default(),
+                speedtest_hosts: Default::default(),
+                reverse_proxy_hosts: Default::default(),
+                built: true,
+            },
+        }
+    }
+
+    /// Finalize [`TlsHostsSettings`]
+    pub fn build(self) -> BuilderResult<TlsHostsSettings> {
+        self.settings.validate().map_err(BuilderError::Validation)?;
+        Ok(self.settings)
+    }
+
+    /// Set the TLS hosts for traffic tunneling
+    pub fn tunnel_hosts(mut self, hosts: Vec<TlsHostInfo>) -> Self {
+        self.settings.tunnel_hosts = hosts;
+        self
+    }
+
+    /// Set the TLS hosts for HTTPS pinging.
+    /// With this one set up the endpoint responds with `200 OK` to HTTPS `GET` requests
+    /// to the specified domains.
+    pub fn ping_hosts(mut self, hosts: Vec<TlsHostInfo>) -> Self {
+        self.settings.ping_hosts = hosts;
+        self
+    }
+
+    /// Set the TLS hosts for speed testing.
+    /// With this one set up the endpoint accepts connections to the specified hosts and
+    /// handles HTTP requests in the following way:
+    ///     * `GET` requests with `/Nmb.bin` path (where `N` is 1 to 100, e.g. `/100mb.bin`)
+    ///       are considered as download speedtest transferring `N` megabytes to a client
+    ///     * `POST` requests with `/upload.html` path and `Content-Length: N`
+    ///       are considered as upload speedtest receiving `N` bytes from a client,
+    ///       where `N` is up to 120 * 1024 * 1024 bytes
+    pub fn speedtest_hosts(mut self, hosts: Vec<TlsHostInfo>) -> Self {
+        self.settings.speedtest_hosts = hosts;
+        self
+    }
+
+    /// The TLS hosts for the connections must be forwarded to the reverse proxy
+    /// (see [`self::Settings::reverse_proxy`]). Only makes sense if the reverse proxy
+    /// is set up, otherwise it is ignored.
+    pub fn reverse_proxy_hosts(mut self, hosts: Vec<TlsHostInfo>) -> Self {
+        self.settings.reverse_proxy_hosts = hosts;
         self
     }
 }

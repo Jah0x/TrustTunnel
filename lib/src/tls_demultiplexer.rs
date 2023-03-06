@@ -1,7 +1,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::{Debug, Formatter};
 use std::io;
-use std::sync::Arc;
+use std::io::ErrorKind;
 use rustls::{Certificate, PrivateKey};
 use crate::{net_utils, settings, utils};
 use crate::settings::{ListenProtocolSettings, Settings};
@@ -79,7 +79,7 @@ pub(crate) struct TlsDemux {
     tunnel_hosts: HashMap<String, Host>,
     reverse_proxy_hosts: HashMap<String, Host>,
     ping_hosts: HashMap<String, Host>,
-    speed_hosts: HashMap<String, Host>,
+    speedtest_hosts: HashMap<String, Host>,
     tunnel_protocols: Vec<Protocol>,
 }
 
@@ -113,7 +113,7 @@ impl Protocol {
 }
 
 impl TlsDemux {
-    pub fn new(settings: Arc<Settings>) -> io::Result<Self> {
+    pub fn new(settings: &Settings, tls_settings: &settings::TlsHostsSettings) -> io::Result<Self> {
         let make_entry = |x: &settings::TlsHostInfo| -> io::Result<(String, Host)> {
             Ok((
                 x.hostname.clone(),
@@ -134,15 +134,23 @@ impl TlsDemux {
             ))
         };
 
+        macro_rules! make_hosts {
+            ($list: expr) => {
+                $list.iter().map(make_entry).collect::<io::Result<_>>()
+            };
+        }
+
         Ok(Self {
-            tunnel_hosts: settings.tunnel_tls_hosts.iter().map(make_entry).collect::<io::Result<_>>()?,
-            ping_hosts: settings.ping_tls_hosts.iter().map(make_entry).collect::<io::Result<_>>()?,
-            speed_hosts: settings.speed_tls_hosts.iter().map(make_entry).collect::<io::Result<_>>()?,
-            reverse_proxy_hosts: settings.reverse_proxy.as_ref()
-                .map_or(
-                    Ok(Default::default()),
-                    |x| x.tls_hosts.iter().map(make_entry).collect::<io::Result<_>>(),
-                )?,
+            tunnel_hosts: make_hosts!(tls_settings.tunnel_hosts)?,
+            ping_hosts: make_hosts!(tls_settings.ping_hosts)?,
+            speedtest_hosts: make_hosts!(tls_settings.speedtest_hosts)?,
+            reverse_proxy_hosts: match (settings.reverse_proxy.as_ref(), &tls_settings.reverse_proxy_hosts) {
+                (None, _) => Default::default(),
+                (Some(_), x) if !x.is_empty() => make_hosts!(x)?,
+                _ => return Err(io::Error::new(
+                    ErrorKind::Other, "Reverse proxy is set up but no TLS hosts are specified for it".to_string(),
+                )),
+            },
             tunnel_protocols: settings.listen_protocols.iter()
                 .map(|x| match x {
                     ListenProtocolSettings::Http1(_) => Protocol::Http1,
@@ -155,16 +163,31 @@ impl TlsDemux {
         })
     }
 
+    /// There is no API method to get SNI from the client hello before accepting
+    /// the connection. So try accepting it with the first certificate and change
+    /// the server certificate afterwards if needed.
+    pub(crate) fn get_quic_connection_bootstrap_meta(&self) -> ConnectionMeta {
+        let (name, host) = self.tunnel_hosts.iter().next().unwrap();
+
+        ConnectionMeta {
+            sni: name.clone(),
+            protocol: Protocol::Http3,
+            channel: Channel::Tunnel,
+            cert_chain: Default::default(), // quiche only accepts paths
+            key: PrivateKey(Default::default()), // quiche only accepts paths
+            cert_chain_path: host.cert_chain_path.clone(),
+            key_path: host.key_path.clone(),
+            sni_auth_creds: None,
+        }
+    }
+
     pub(crate) fn select<'a, I>(&self, alpn: I, sni: String) -> Result<ConnectionMeta, String>
         where I: Iterator<Item=&'a [u8]> + Clone
     {
         let parsed_alpn: Vec<_> = alpn.clone()
             .map(std::str::from_utf8)
-            .filter(Result::is_ok)
-            .map(Result::unwrap)
-            .map(Protocol::from_alpn)
-            .filter(Option::is_some)
-            .map(Option::unwrap)
+            .filter_map(Result::ok)
+            .filter_map(Protocol::from_alpn)
             .collect();
         if parsed_alpn.is_empty() && alpn.clone().peekable().peek().is_some() {
             return Err(format!(
@@ -197,7 +220,7 @@ impl TlsDemux {
                 }
             } else if let Some(h) = self.ping_hosts.get(&sni) {
                 (parsed_alpn.iter().max().cloned().unwrap_or(DEFAULT_PROTOCOL), Channel::Ping, h, None)
-            } else if let Some(h) = self.speed_hosts.get(&sni) {
+            } else if let Some(h) = self.speedtest_hosts.get(&sni) {
                 (parsed_alpn.iter().max().cloned().unwrap_or(DEFAULT_PROTOCOL), Channel::Speed, h, None)
             } else if let Some((host, auth_creds)) = sni.split_once('.')
                 .and_then(|(a, b)| self.tunnel_hosts.get(b).zip(Some(a)))
@@ -249,10 +272,18 @@ impl TlsDemux {
 #[cfg(test)]
 mod tests {
     use std::net::ToSocketAddrs;
-    use std::sync::Arc;
-    use crate::settings::{Http1Settings, Http2Settings, ListenProtocolSettings, QuicSettings, ReverseProxySettings, Settings, TlsHostInfo};
+    use tls_demultiplexer::TlsDemux;
+    use crate::settings::{Http1Settings, Http2Settings, ListenProtocolSettings, QuicSettings, ReverseProxySettings, Settings, TlsHostInfo, TlsHostsSettings};
     use crate::tls_demultiplexer;
     use crate::tls_demultiplexer::{Channel, ConnectionMeta, Protocol};
+
+    fn dummy_reverse_proxy_settings() -> ReverseProxySettings {
+        ReverseProxySettings {
+            server_address: "0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap(),
+            connection_timeout: Default::default(),
+            h3_backward_compatibility: Default::default(),
+        }
+    }
 
     fn listen_protocol_settings_as_str(x: &ListenProtocolSettings) -> &'static str {
         match x {
@@ -265,21 +296,22 @@ mod tests {
     fn make_tls_host(host: String) -> TlsHostInfo {
         TlsHostInfo {
             hostname: host,
-            cert_chain_path: Default::default(),
-            private_key_path: Default::default(),
+            ..Default::default()
         }
     }
 
-    fn check_protocol_selection(listen_protocol: Vec<ListenProtocolSettings>, advertised_protocols: Vec<Protocol>)
+    fn check_protocol_selection(listen_protocols: Vec<ListenProtocolSettings>, advertised_protocols: Vec<Protocol>)
                                 -> Result<ConnectionMeta, String>
     {
         const TEST_HOST: &str = "example.com";
 
         let mut settings = Settings::default();
-        settings.tunnel_tls_hosts = vec![make_tls_host(TEST_HOST.to_string())];
-        settings.listen_protocols = listen_protocol;
+        settings.listen_protocols = listen_protocols;
 
-        let demux = tls_demultiplexer::TlsDemux::new(Arc::new(settings)).unwrap();
+        let mut tls_settings = TlsHostsSettings::default();
+        tls_settings.tunnel_hosts = vec![make_tls_host(TEST_HOST.to_string())];
+
+        let demux = TlsDemux::new(&settings, &tls_settings).unwrap();
         demux.select(advertised_protocols.iter().map(Protocol::as_alpn).map(str::as_bytes), TEST_HOST.to_string())
     }
 
@@ -361,14 +393,12 @@ mod tests {
         const TEST_HOST: &str = "example.com";
 
         let mut settings = Settings::default();
-        settings.reverse_proxy = Some(ReverseProxySettings {
-            server_address: "0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap(),
-            tls_hosts: vec![make_tls_host(TEST_HOST.to_string())],
-            connection_timeout: Default::default(),
-            h3_backward_compatibility: Default::default(),
-        });
+        settings.reverse_proxy = Some(dummy_reverse_proxy_settings());
 
-        let demux = tls_demultiplexer::TlsDemux::new(Arc::new(settings)).unwrap();
+        let mut tls_settings = TlsHostsSettings::default();
+        tls_settings.reverse_proxy_hosts = vec![make_tls_host(TEST_HOST.to_string())];
+
+        let demux = TlsDemux::new(&settings, &tls_settings).unwrap();
 
         let meta = demux.select([Protocol::Http1.as_alpn().as_bytes()].into_iter(), TEST_HOST.to_string()).unwrap();
         assert_eq!(meta.protocol, Protocol::Http1);
@@ -381,10 +411,10 @@ mod tests {
     fn ping_protocol_selection() {
         const TEST_HOST: &str = "example.com";
 
-        let mut settings = Settings::default();
-        settings.ping_tls_hosts = vec![make_tls_host(TEST_HOST.to_string())];
+        let mut tls_settings = TlsHostsSettings::default();
+        tls_settings.ping_hosts = vec![make_tls_host(TEST_HOST.to_string())];
 
-        let demux = tls_demultiplexer::TlsDemux::new(Arc::new(settings)).unwrap();
+        let demux = TlsDemux::new(&Settings::default(), &tls_settings).unwrap();
 
         let meta = demux.select([Protocol::Http1.as_alpn().as_bytes()].into_iter(), TEST_HOST.to_string()).unwrap();
         assert_eq!(meta.protocol, Protocol::Http1);
@@ -398,10 +428,10 @@ mod tests {
     fn speedtest_protocol_selection() {
         const TEST_HOST: &str = "example.com";
 
-        let mut settings = Settings::default();
-        settings.speed_tls_hosts = vec![make_tls_host(TEST_HOST.to_string())];
+        let mut tls_settings = TlsHostsSettings::default();
+        tls_settings.speedtest_hosts = vec![make_tls_host(TEST_HOST.to_string())];
 
-        let demux = tls_demultiplexer::TlsDemux::new(Arc::new(settings)).unwrap();
+        let demux = TlsDemux::new(&Settings::default(), &tls_settings).unwrap();
 
         let meta = demux.select([Protocol::Http1.as_alpn().as_bytes()].into_iter(), TEST_HOST.to_string()).unwrap();
         assert_eq!(meta.protocol, Protocol::Http1);
@@ -426,17 +456,15 @@ mod tests {
         ];
 
         let mut settings = Settings::default();
-        settings.tunnel_tls_hosts = vec![make_tls_host("tunnel".to_string())];
-        settings.ping_tls_hosts = vec![make_tls_host("ping".to_string())];
-        settings.speed_tls_hosts = vec![make_tls_host("speedtest".to_string())];
-        settings.reverse_proxy = Some(ReverseProxySettings {
-            server_address: "0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap(),
-            tls_hosts: vec![make_tls_host("reverse.proxy".to_string())],
-            connection_timeout: Default::default(),
-            h3_backward_compatibility: Default::default(),
-        });
+        settings.reverse_proxy = Some(dummy_reverse_proxy_settings());
 
-        let demux = tls_demultiplexer::TlsDemux::new(Arc::new(settings)).unwrap();
+        let mut tls_settings = TlsHostsSettings::default();
+        tls_settings.tunnel_hosts = vec![make_tls_host("tunnel".to_string())];
+        tls_settings.ping_hosts = vec![make_tls_host("ping".to_string())];
+        tls_settings.speedtest_hosts = vec![make_tls_host("speedtest".to_string())];
+        tls_settings.reverse_proxy_hosts = vec![make_tls_host("reverse.proxy".to_string())];
+
+        let demux = TlsDemux::new(&settings, &tls_settings).unwrap();
         let advertised_alpn = [Protocol::Http1.as_alpn().as_bytes()].into_iter();
 
         for sample in test_samples {
@@ -451,20 +479,26 @@ mod tests {
         const CREDENTIALS: &str = "creds";
 
         let mut settings = Settings::default();
-        settings.tunnel_tls_hosts = vec![make_tls_host(TUNNEL_HOST.to_string())];
-        settings.ping_tls_hosts = vec![make_tls_host(format!("ping.{TUNNEL_HOST}"))];
-        settings.speed_tls_hosts = vec![make_tls_host(format!("speedtest.{TUNNEL_HOST}"))];
-        settings.reverse_proxy = Some(ReverseProxySettings {
-            server_address: "0.0.0.0:0".to_socket_addrs().unwrap().next().unwrap(),
-            tls_hosts: vec![make_tls_host(format!("reverse.proxy.{TUNNEL_HOST}"))],
-            connection_timeout: Default::default(),
-            h3_backward_compatibility: Default::default(),
-        });
+        settings.reverse_proxy = Some(dummy_reverse_proxy_settings());
 
-        let demux = tls_demultiplexer::TlsDemux::new(Arc::new(settings)).unwrap();
+        let mut tls_settings = TlsHostsSettings::default();
+        tls_settings.tunnel_hosts = vec![make_tls_host(TUNNEL_HOST.to_string())];
+        tls_settings.ping_hosts = vec![make_tls_host(format!("ping.{TUNNEL_HOST}"))];
+        tls_settings.speedtest_hosts = vec![make_tls_host(format!("speedtest.{TUNNEL_HOST}"))];
+        tls_settings.reverse_proxy_hosts = vec![make_tls_host(format!("reverse.proxy.{TUNNEL_HOST}"))];
+
+        let demux = TlsDemux::new(&settings, &tls_settings).unwrap();
         let advertised_alpn = [Protocol::Http1.as_alpn().as_bytes()].into_iter();
         let meta = demux.select(advertised_alpn.clone(), format!("{CREDENTIALS}.{TUNNEL_HOST}")).unwrap();
         assert_eq!(meta.channel, Channel::Tunnel);
         assert_eq!(meta.sni_auth_creds.as_deref(), Some(CREDENTIALS));
+    }
+
+    #[test]
+    fn reverse_proxy_set_up_without_hosts() {
+        let mut settings = Settings::default();
+        settings.reverse_proxy = Some(dummy_reverse_proxy_settings());
+
+        TlsDemux::new(&settings, &TlsHostsSettings::default()).map(|_| ()).unwrap_err();
     }
 }
