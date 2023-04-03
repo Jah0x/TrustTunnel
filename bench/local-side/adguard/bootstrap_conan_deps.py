@@ -35,7 +35,15 @@ os.chdir(work_dir)
 nlc_dir = os.path.join(work_dir, nlc_dir_name)
 subprocess.run(["git", "clone", nlc_url, nlc_dir], check=True)
 os.chdir(nlc_dir)
-for v in nlc_versions:
-    subprocess.run(["git", "checkout", "master"], check=True)
-    subprocess.run([os.path.join(nlc_dir, "scripts", "export_conan.py"), v], check=True)
+
+# Reduce the chances of missing a necessary dependency exported with NLC
+# by exporting all recipes from all versions of NLC, starting with the minimum
+# necessary.
+min_nlc_version = min(nlc_versions)
+with open("conandata.yml", "r") as file:
+    items = yaml.safe_load(file)["commit_hash"]
+    for v in [k for k in items.keys() if k >= min_nlc_version]:
+        subprocess.run(["git", "checkout", "master"], check=True)
+        subprocess.run([os.path.join(nlc_dir, "scripts", "export_conan.py"), v], check=True)
+
 shutil.rmtree(nlc_dir)

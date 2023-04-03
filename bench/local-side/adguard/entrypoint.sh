@@ -29,8 +29,8 @@ COMMON_CONFIG=$(
 END
 )
 
-iptables -I OUTPUT -o eth0 -d "$ENDPOINT_IP" -j ACCEPT
-iptables -A OUTPUT -o eth0 -j DROP
+iptables -I OUTPUT -o eth0 -d "$ENDPOINT_IP" -j ACCEPT || echo "Failed to allow connections to endpoint via iptables"
+iptables -A OUTPUT -o eth0 -j DROP || echo "Failed to set iptables firewall"
 
 if [[ "$MODE" == "tun" ]]; then
   {
