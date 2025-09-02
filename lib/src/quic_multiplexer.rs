@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use boring::ssl::{SelectCertError, SslContextBuilder, SslMethod, SslRef};
 use bytes::{Buf, Bytes, BytesMut};
 use http::header::InvalidHeaderName;
 use lazy_static::lazy_static;
@@ -23,6 +24,7 @@ use crate::utils::Either;
 const TOKEN_PREFIX_SIZE: usize = 16;
 const MUX_ID_FMT: &str = "QMUX={}";
 const SOCKET_ID_FMT: &str = "QSOCK={}";
+
 const QUIC_CONNECTION_CLOSE_CODE: u64 = 0x42;
 
 type QuicConnection = quiche::Connection;
@@ -56,6 +58,8 @@ pub(crate) struct QuicSocket {
     waiting_writable_streams: std::sync::Mutex<HashSet<u64>>,
     id: log_utils::IdChain<u64>,
     tls_connection_meta: tls_demultiplexer::ConnectionMeta,
+    /// TLS client_random extracted from QUIC handshake
+    client_random: Vec<u8>,
 }
 
 pub(crate) enum QuicSocketEvent {
@@ -453,6 +457,15 @@ impl QuicMultiplexer {
             Arc::new(std::sync::Mutex::new(h3_conn))
         };
 
+        // Extract client_random from QUIC after handshake is complete
+        let extracted_client_random = {
+            let mut quic = quic_conn.lock().unwrap();
+            let ssl: &mut SslRef = quic.as_mut();
+            let mut client_random = [0u8; 32];
+            ssl.client_random(&mut client_random);
+            client_random.to_vec()
+        };
+
         let (tx, rx) = mpsc::channel(1);
         self.connections.insert(conn_id.clone().into_owned(), Connection::Established(EstablishedConnection {
             socket_tx: tx,
@@ -471,6 +484,7 @@ impl QuicMultiplexer {
                 SOCKET_ID_FMT, self.next_socket_id.fetch_add(1, Ordering::Relaxed),
             )),
             tls_connection_meta: conn.tls_connection_meta,
+            client_random: extracted_client_random,
         })
     }
 
@@ -632,6 +646,10 @@ impl QuicSocket {
 
     pub fn tls_connection_meta(&self) -> &tls_demultiplexer::ConnectionMeta {
         &self.tls_connection_meta
+    }
+
+    pub fn client_random(&self) -> Vec<u8> {
+        self.client_random.clone()
     }
 
     pub fn send_response(&self, stream_id: u64, response: ResponseHeaders, fin: bool) -> io::Result<()> {
@@ -814,9 +832,6 @@ impl QuicSocket {
                 log_id!(trace, self.id, "Stream reset by client: id={}, err={}", stream_id, err);
                 Ok(Some(QuicSocketEvent::Close(stream_id)))
             }
-            Ok((_, h3::Event::Datagram)) => Err(io::Error::new(
-                ErrorKind::Other, "Received unexpected datagram frame",
-            )),
             Ok((_, h3::Event::PriorityUpdate)) => Ok(None),
             Ok((_, h3::Event::GoAway)) => Err(io::Error::new(
                 ErrorKind::UnexpectedEof, "Received GOAWAY",
@@ -937,9 +952,11 @@ fn quic_recv(
 fn make_quic_conn_config(
     core_settings: &Settings, cert_chain_file: &str, priv_key_file: &str,
 ) -> io::Result<quiche::Config> {
+
+    let ctx = SslContextBuilder::new(SslMethod::tls())?;
     let quic_settings = core_settings.listen_protocols.quic.as_ref().unwrap();
 
-    let mut cfg = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    let mut cfg = quiche::Config::with_boring_ssl_ctx_builder(quiche::PROTOCOL_VERSION, ctx).unwrap();
     cfg.load_cert_chain_from_pem_file(cert_chain_file).unwrap();
     cfg.load_priv_key_from_pem_file(priv_key_file).unwrap();
     cfg.set_application_protos(h3::APPLICATION_PROTOCOL).unwrap();

@@ -5,6 +5,7 @@ use crate::user_interaction::{ask_for_agreement, ask_for_input, checked_overwrit
 
 mod composer;
 mod library_settings;
+mod rules_settings;
 mod template_settings;
 mod tls_hosts_settings;
 mod user_interaction;
@@ -134,7 +135,7 @@ Required in non-interactive mode."#),
                     Some("vpn.toml".into()),
                 ));
             if checked_overwrite(&path, "Overwrite the existing library settings file?") {
-                let doc = composer::compose_document(&built.settings, &built.credentials_path);
+                let doc = composer::compose_document(&built.settings, &built.credentials_path, &built.rules_path);
                 fs::write(&path, doc)
                     .expect("Couldn't write the library settings to a file");
             }

@@ -11,7 +11,7 @@ use macros::{Getter, RuntimeDoc};
 use serde::{Deserialize, Serialize};
 use toml_edit::{Document, Item};
 use authentication::registry_based::Client;
-use crate::{authentication, utils};
+use crate::{authentication, utils, rules};
 
 pub type Socks5BuilderResult<T> = Result<T, Socks5Error>;
 
@@ -28,6 +28,8 @@ pub enum ValidationError {
     ReverseProxy(String),
     /// Invalid [`Settings.listen_protocols`]
     ListenProtocols(String),
+    /// Invalid rules file
+    RulesFile(String),
 }
 
 impl Debug for ValidationError {
@@ -39,6 +41,7 @@ impl Debug for ValidationError {
             Self::SpeedTlsHostInfo(x) => write!(f, "Invalid speedtest TLS hosts: {}", x),
             Self::ReverseProxy(x) => write!(f, "Invalid reverse proxy settings: {}", x),
             Self::ListenProtocols(x) => write!(f, "Invalid listen protocols settings: {}", x),
+            Self::RulesFile(x) => write!(f, "Invalid rules file: {}", x),
         }
     }
 }
@@ -142,6 +145,13 @@ pub struct Settings {
     pub(crate) icmp: Option<IcmpSettings>,
     /// The metrics gathering request handler settings
     pub(crate) metrics: Option<MetricsSettings>,
+    /// Path to the rules file for connection filtering.
+    /// If not specified or file doesn't exist, all connections are allowed by default.
+    #[serde(default)]
+    #[serde(skip_serializing)]
+    #[serde(rename(deserialize = "rules_file"))]
+    #[serde(deserialize_with = "deserialize_rules")]
+    pub(crate) rules_engine: Option<rules::RulesEngine>,
 
     /// Whether an instance was built through a [`SettingsBuilder`].
     /// This flag is a workaround for absence of the ability to validate
@@ -496,6 +506,7 @@ impl Default for Settings {
             reverse_proxy: None,
             icmp: None,
             metrics: Default::default(),
+            rules_engine: Some(rules::RulesEngine::default_allow()),
             built: false,
         }
     }
@@ -732,6 +743,7 @@ impl SettingsBuilder {
                 reverse_proxy: None,
                 icmp: None,
                 metrics: Default::default(),
+                rules_engine: Some(rules::RulesEngine::default_allow()),
                 built: true,
             },
         }
@@ -837,6 +849,12 @@ impl SettingsBuilder {
     /// Set the metrics request listener settings
     pub fn metrics(mut self, x: MetricsSettings) -> Self {
         self.settings.metrics = Some(x);
+        self
+    }
+
+    /// Set the rules engine for connection filtering
+    pub fn rules_engine(mut self, x: rules::RulesEngine) -> Self {
+        self.settings.rules_engine = Some(x);
         self
     }
 }
@@ -1309,6 +1327,75 @@ fn deserialize_clients<'de, D>(deserializer: D) -> Result<Vec<Client>, D::Error>
         })).collect();
 
     Ok(res)
+}
+
+fn deserialize_rules<'de, D>(deserializer: D) -> Result<Option<rules::RulesEngine>, D::Error>
+    where
+        D: serde::de::Deserializer<'de>,
+{
+    let path = match deserialize_file_path(deserializer) {
+        Ok(path) => path,
+        Err(_) => {
+            // No rules file specified, default to allow all
+            return Ok(Some(rules::RulesEngine::default_allow()));
+        }
+    };
+
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(e) => {
+            // Log warning but don't fail - default to allow all
+            eprintln!("Warning: Could not read rules file '{}': {}. Defaulting to allow all connections.", path, e);
+            return Ok(Some(rules::RulesEngine::default_allow()));
+        }
+    };
+
+    let rules_doc: Document = match content.parse() {
+        Ok(doc) => doc,
+        Err(e) => {
+            eprintln!("Warning: Could not parse rules file '{}': {}. Defaulting to allow all connections.", path, e);
+            return Ok(Some(rules::RulesEngine::default_allow()));
+        }
+    };
+
+    let rules_config = match rules_doc.get("rule").and_then(Item::as_array_of_tables) {
+        Some(rules_array) => {
+            let rules: Vec<rules::Rule> = rules_array
+                .iter()
+                .filter_map(|rule_table| {
+                    let cidr = rule_table.get("cidr")
+                        .and_then(Item::as_str)
+                        .map(|s| s.to_string());
+                    
+                    let client_random_prefix = rule_table.get("client_random_prefix")
+                        .and_then(Item::as_str)
+                        .map(|s| s.to_string());
+                    
+                    let action = rule_table.get("action")
+                        .and_then(Item::as_str)
+                        .and_then(|s| match s {
+                            "allow" => Some(rules::RuleAction::Allow),
+                            "deny" => Some(rules::RuleAction::Deny),
+                            _ => None,
+                        })?;
+                    
+                    Some(rules::Rule {
+                        cidr,
+                        client_random_prefix,
+                        action,
+                    })
+                })
+                .collect();
+            
+            rules::RulesConfig { rule: rules }
+        }
+        None => {
+            // No rules array found, create empty config
+            rules::RulesConfig { rule: vec![] }
+        }
+    };
+
+    Ok(Some(rules::RulesEngine::from_config(rules_config)))
 }
 
 fn demangle_toml_string(x: String) -> String {

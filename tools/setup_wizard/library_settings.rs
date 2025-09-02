@@ -5,10 +5,12 @@ use crate::Mode;
 use crate::user_interaction::{ask_for_agreement, ask_for_input, ask_for_password, checked_overwrite, select_variant};
 
 pub const DEFAULT_CREDENTIALS_PATH: &str = "credentials.toml";
+pub const DEFAULT_RULES_PATH: &str = "rules.toml";
 
 pub struct Built {
     pub settings: Settings,
     pub credentials_path: String,
+    pub rules_path: String,
 }
 
 pub fn build() -> Built {
@@ -30,6 +32,7 @@ pub fn build() -> Built {
             })
             .build().expect("Couldn't build the library settings"),
         credentials_path: build_authenticator(),
+        rules_path: build_rules(),
     }
 }
 
@@ -51,6 +54,31 @@ fn build_authenticator() -> String {
             fs::write(&path, compose_credentials_content(users.into_iter()))
                 .expect("Couldn't write the credentials into a file");
             println!("The user credentials are written to file: {}", path);
+        }
+
+        path
+    }
+}
+
+fn build_rules() -> String {
+    if crate::get_mode() != Mode::NonInteractive
+        && check_file_exists(".", DEFAULT_RULES_PATH)
+        && ask_for_agreement(&format!("Reuse the existing rules file: {DEFAULT_RULES_PATH}?"))
+    {
+        DEFAULT_RULES_PATH.into()
+    } else {
+        let path = ask_for_input::<String>(
+            "Path to the rules file",
+            Some(DEFAULT_RULES_PATH.into()),
+        );
+
+        if checked_overwrite(&path, "Overwrite the existing rules file?") {
+            println!("Let's create connection filtering rules");
+            let rules_config = crate::rules_settings::build();
+            let rules_content = generate_rules_toml_content(&rules_config);
+            fs::write(&path, rules_content)
+                .expect("Couldn't write the rules into a file");
+            println!("The rules configuration is written to file: {}", path);
         }
 
         path
@@ -94,6 +122,33 @@ fn compose_credentials_content(clients: impl Iterator<Item=(String, String)>) ->
     doc.insert_formatted(&Key::new("client"), Item::ArrayOfTables(x));
 
     doc.to_string()
+}
+
+fn generate_rules_toml_content(rules_config: &vpn_libs_endpoint::rules::RulesConfig) -> String {
+    let mut content = String::new();
+    
+    // Add header comments explaining the format
+    content.push_str("# Rules configuration for VPN endpoint connection filtering\n");
+    content.push_str("# \n");
+    content.push_str("# This file defines filter rules for incoming connections.\n");
+    content.push_str("# Rules are evaluated in order, and the first matching rule's action is applied.\n");
+    content.push_str("# If no rules match, the connection is allowed by default.\n");
+    content.push_str("#\n");
+    content.push_str("# Each rule can specify:\n");
+    content.push_str("# - cidr: IP address range in CIDR notation\n");
+    content.push_str("# - client_random_prefix: Hex-encoded prefix of TLS client random data\n");
+    content.push_str("# - action: \"allow\" or \"deny\"\n");
+    content.push_str("#\n");
+    content.push_str("# Both cidr and client_random_prefix are optional - if specified, both must match for the rule to apply.\n");
+    content.push_str("# If only one is specified, only that condition needs to match.\n\n");
+    
+    // Serialize the actual rules (usually empty)
+    if !rules_config.rule.is_empty() {
+        content.push_str(&toml::ser::to_string(rules_config).unwrap());
+        content.push_str("\n");
+    }
+    
+    content
 }
 
 fn check_file_exists(path: &str, name: &str) -> bool {

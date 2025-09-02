@@ -11,6 +11,7 @@ pub mod shutdown;
 pub mod net_utils;
 pub mod utils;
 pub mod client_config;
+pub mod rules;
 
 mod direct_forwarder;
 mod downstream;

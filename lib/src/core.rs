@@ -5,7 +5,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, UdpSocket};
 use crate::direct_forwarder::DirectForwarder;
-use crate::{authentication, http_ping_handler, http_speedtest_handler, log_id, log_utils, metrics, net_utils, reverse_proxy, settings, tls_demultiplexer, tunnel};
+use crate::{authentication, http_ping_handler, http_speedtest_handler, log_id, log_utils, metrics, net_utils, reverse_proxy, rules, settings, tls_demultiplexer, tunnel};
+use crate::net_utils::PeerAddr;
 use crate::tls_demultiplexer::TlsDemux;
 use crate::forwarder::Forwarder;
 use crate::http1_codec::Http1Codec;
@@ -158,7 +159,7 @@ impl Core {
             let client_id = log_utils::IdChain::from(log_utils::IdItem::new(
                 log_utils::CLIENT_ID_FMT, self.context.next_client_id.fetch_add(1, Ordering::Relaxed),
             ));
-            let stream = match tcp_listener.accept().await
+            let (stream, client_addr) = match tcp_listener.accept().await
                 .and_then(|(s, a)| {
                     s.set_nodelay(true)?;
                     Ok((s, a))
@@ -166,7 +167,7 @@ impl Core {
             {
                 Ok((stream, addr)) => if has_tcp_based_codec {
                     log_id!(debug, client_id, "New TCP client: {}", addr);
-                    stream
+                    (stream, addr)
                 } else {
                     continue; // accept just for pings
                 }
@@ -185,9 +186,9 @@ impl Core {
                         .await
                         .unwrap_or_else(|_| Err(io::Error::from(ErrorKind::TimedOut)))
                     {
-                        Ok(stream) =>
+                        Ok(acceptor) =>
                             if let Err((client_id, message)) = Core::on_new_tls_connection(
-                                context.clone(), stream, client_id,
+                                context.clone(), acceptor, client_addr.ip(), client_id,
                             ).await {
                                 log_id!(debug, client_id, "{}", message);
                             },
@@ -240,12 +241,19 @@ impl Core {
     async fn on_new_tls_connection(
         context: Arc<Context>,
         acceptor: TlsAcceptor,
+        client_ip: std::net::IpAddr,
         client_id: log_utils::IdChain<u64>,
     ) -> Result<(), (log_utils::IdChain<u64>, String)> {
         let sni = match acceptor.sni() {
             Some(s) => s,
             None => return Err((client_id, "Drop TLS connection due to absence of SNI".to_string())),
         };
+        // Apply connection filtering rules
+        if let Err(deny_reason) = Self::evaluate_connection_rules(
+            &context, Some(client_ip), acceptor.client_random().as_deref(), &client_id
+        ) {
+            return Err((client_id, deny_reason));
+        }
 
         let core_settings = context.settings.clone();
         let tls_connection_meta =
@@ -336,6 +344,17 @@ impl Core {
         socket: QuicSocket,
         client_id: log_utils::IdChain<u64>,
     ) {
+        // Apply connection filtering rules
+        let client_ip = socket.peer_addr().ok().map(|addr| addr.ip());
+        let client_random = Some(socket.client_random());
+        
+        if let Err(deny_reason) = Self::evaluate_connection_rules(
+            &context, client_ip, client_random.as_deref(), &client_id
+        ) {
+            log_id!(debug, client_id, "{}", deny_reason);
+            return; // Drop the connection
+        }
+
         let tls_connection_meta = socket.tls_connection_meta();
         log_id!(debug, client_id, "Connection meta: {:?}", tls_connection_meta);
 
@@ -381,6 +400,32 @@ impl Core {
                 ).await
             }
         }
+    }
+
+    /// Helper function to evaluate connection filtering rules
+    fn evaluate_connection_rules(
+        context: &Arc<Context>,
+        client_ip: Option<std::net::IpAddr>,
+        client_random: Option<&[u8]>,
+        log_id: &log_utils::IdChain<u64>,
+    ) -> Result<(), String> {
+        if let Some(rules_engine) = &context.settings.rules_engine {
+            if let Some(ip) = client_ip {
+                let rule_result = rules_engine.evaluate(&ip, client_random);
+                match rule_result {
+                    rules::RuleEvaluation::Deny => {
+                        log_id!(debug, log_id, "Connection denied by filtering rules for IP: {}", ip);
+                        return Err("Connection denied by filtering rules".to_string());
+                    }
+                    rules::RuleEvaluation::Allow => {
+                        log_id!(debug, log_id, "Connection allowed by filtering rules");
+                    }
+                }
+            } else {
+                log_id!(warn, log_id, "Could not extract client IP for rules evaluation");
+            }
+        }
+        Ok(())
     }
 
     async fn on_tunnel_request(

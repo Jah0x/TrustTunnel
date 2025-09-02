@@ -18,6 +18,24 @@ listen_address = ""
 # ```
 credentials_file = "{}"
 
+# The path to a TOML file for connection filtering rules in the following format:
+#
+# ```
+# [[rule]]
+# cidr = "192.168.0.0/16"
+# action = "allow"
+#
+# [[rule]]
+# client_random_prefix = "aabbcc"
+# action = "deny"
+#
+# [[rule]]
+# action = "deny"
+#
+# If no rules in this file, all connections are allowed by default.
+# ```
+rules_file = "{}"
+
 {}
 ipv6_available = {}
 
@@ -41,6 +59,7 @@ udp_connections_timeout_secs = {}
 "#,
     Settings::doc_listen_address().to_toml_comment(),
     crate::library_settings::DEFAULT_CREDENTIALS_PATH,
+    crate::library_settings::DEFAULT_RULES_PATH,
     Settings::doc_ipv6_available().to_toml_comment(),
     Settings::default_ipv6_available(),
     Settings::doc_allow_private_network_connections().to_toml_comment(),

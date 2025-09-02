@@ -4,8 +4,8 @@ use vpn_libs_endpoint::settings::{ForwardProtocolSettings, Http1Settings, Http2S
 use vpn_libs_endpoint::utils::{IterJoin, ToTomlComment};
 use crate::template_settings;
 
-pub fn compose_document(settings: &Settings, credentials_path: &str) -> String {
-    once(compose_main_table(settings, credentials_path))
+pub fn compose_document(settings: &Settings, credentials_path: &str, rules_path: &str) -> String {
+    once(compose_main_table(settings, credentials_path, rules_path))
         .chain(once(compose_forward_protocol_table(settings.get_forward_protocol())))
         .chain(once(compose_listener_protocol_table(settings.get_listen_protocols())))
         .chain(once(compose_icmp_table(settings.get_icmp().as_ref())))
@@ -13,11 +13,12 @@ pub fn compose_document(settings: &Settings, credentials_path: &str) -> String {
         .join("\n")
 }
 
-fn compose_main_table(settings: &Settings, credentials_path: &str) -> String {
+fn compose_main_table(settings: &Settings, credentials_path: &str, rules_path: &str) -> String {
     let mut doc: Document = template_settings::MAIN_TABLE.parse().unwrap();
 
     doc["listen_address"] = value(settings.get_listen_address().to_string());
     doc["credentials_file"] = value(credentials_path);
+    doc["rules_file"] = value(rules_path);
     doc["ipv6_available"] = value(*settings.get_ipv6_available());
     doc["allow_private_network_connections"] = value(*settings.get_allow_private_network_connections());
     doc["tls_handshake_timeout_secs"] = value(settings.get_tls_handshake_timeout().as_secs() as i64);
