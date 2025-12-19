@@ -34,6 +34,7 @@ pub(crate) struct Echo {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum DeserializeError {
     InvalidLength(String),
     MessageType(u8),

@@ -9,9 +9,9 @@ use log::info;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use trusttunnel::authentication;
-use trusttunnel::authentication::registry_based::RegistryBasedAuthenticator;
 use trusttunnel::settings::{ForwardProtocolSettings, Http1Settings, ListenProtocolSettings, Settings, Socks5ForwarderSettings, TlsHostInfo, TlsHostsSettings};
 
+#[allow(dead_code)]
 mod common;
 
 #[tokio::test]

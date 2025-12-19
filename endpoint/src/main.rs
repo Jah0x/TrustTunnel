@@ -86,7 +86,7 @@ fn main() {
         return;
     }
 
-    #[cfg(feature = "console-subscriber")]
+    #[cfg(feature = "tracing")]
     console_subscriber::init();
 
     let _guard = args.get_one::<String>(SENTRY_DSN_PARAM_NAME)

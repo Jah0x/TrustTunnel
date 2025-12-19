@@ -51,7 +51,10 @@ pub(crate) enum NotificationError {
 }
 
 /// Protects [`Shutdown::completion`] from early return
-pub(crate) struct CompletionGuard(mpsc::Sender<()>);
+pub(crate) struct CompletionGuard(
+    #[allow(dead_code)]
+    mpsc::Sender<()>
+);
 
 
 impl Shutdown {

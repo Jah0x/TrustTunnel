@@ -92,6 +92,7 @@ pub(crate) trait PendingRequest: Send {
 /// Encapsulates a non-responded transmitting part of an HTTP stream state
 pub(crate) trait PendingRespond: Send {
     /// Get the request ID for logging
+    #[allow(dead_code)]
     fn id(&self) -> log_utils::IdChain<u64>;
 
     /// Send the intermediate response to a client. Unlike `send_response()`,

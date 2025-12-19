@@ -7,6 +7,7 @@ use log::info;
 use tokio::net::TcpListener;
 use trusttunnel::settings::{Http1Settings, Http2Settings, ListenProtocolSettings, QuicSettings, ReverseProxySettings, Settings, TlsHostInfo, TlsHostsSettings};
 
+#[allow(dead_code)]
 mod common;
 
 macro_rules! reverse_proxy_tests {

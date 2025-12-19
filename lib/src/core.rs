@@ -479,7 +479,7 @@ impl Core {
         io: IO,
         log_id: log_utils::IdChain<u64>,
     ) -> io::Result<Box<dyn HttpCodec>>
-        where IO: 'static + AsyncRead + AsyncWrite + Unpin + Send + net_utils::PeerAddr
+        where IO: 'static + AsyncRead + AsyncWrite + Unpin + Send + PeerAddr
     {
         match protocol {
             tls_demultiplexer::Protocol::Http1 => Ok(Box::new(Http1Codec::new(

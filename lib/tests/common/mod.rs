@@ -403,7 +403,7 @@ impl Http3Session {
         while let Some(mut chunk) = futures::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx)).await.as_deref() {
             while !chunk.is_empty() {
                 let stream_id = self.stream_id();
-                match self.h3_conn.send_body(&mut self.quic_conn, stream_id, chunk.deref(), false) {
+                match self.h3_conn.send_body(&mut self.quic_conn, stream_id, chunk, false) {
                     Ok(n) => chunk = &chunk[n..],
                     Err(h3::Error::Done) => {
                         Self::flush_quic_data(&self.socket, &mut self.quic_conn);

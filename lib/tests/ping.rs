@@ -3,6 +3,7 @@ use std::time::Duration;
 use http::Request;
 use trusttunnel::net_utils;
 
+#[allow(dead_code)]
 mod common;
 
 macro_rules! ping_tests {

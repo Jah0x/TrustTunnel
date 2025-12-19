@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
-use boring::ssl::{SelectCertError, SslContextBuilder, SslMethod, SslRef};
+use boring::ssl::{SslContextBuilder, SslMethod, SslRef};
 use bytes::{Buf, Bytes, BytesMut};
 use http::header::InvalidHeaderName;
 use lazy_static::lazy_static;

@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use trusttunnel::net_utils;
 
+#[allow(dead_code)]
 mod common;
 
 const TCP_CONTENT_SIZE: usize = 2 * 1024 * 1024;

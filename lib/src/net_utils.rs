@@ -520,7 +520,7 @@ mod tests {
     fn scrubbing_of_headers() {
         let mut original = http::request::Request::new(()).into_parts().0;
         original.method.clone_from(&http::Method::GET);
-        original.uri.clone_from(&uri::Uri::from_static("https://example.org/abcd"));
+        original.uri.clone_from(&uri::Uri::from_static("https://httpbin.agrd.dev/abcd"));
         original.version.clone_from(&http::Version::HTTP_11);
         original.headers.insert(http::header::AUTHORIZATION, http::HeaderValue::from_static("secret1"));
         original.headers.insert(http::header::PROXY_AUTHORIZATION, http::HeaderValue::from_static("secret2"));
