@@ -32,6 +32,7 @@ echo "New version is ${NEW_VERSION}"
 
 set -x
 
+# Update toml
 sed -i -e "s/^version = \"${VERSION}\"$/version = \"${NEW_VERSION}\"/" "$MANIFEST_FILE"
 
 # Update changelog

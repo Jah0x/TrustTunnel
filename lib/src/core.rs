@@ -1,13 +1,4 @@
-use std::io;
-use std::io::ErrorKind;
-use std::sync::{Arc, Mutex, RwLock};
-use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, UdpSocket};
 use crate::direct_forwarder::DirectForwarder;
-use crate::{authentication, http_ping_handler, http_speedtest_handler, log_id, log_utils, metrics, net_utils, reverse_proxy, rules, settings, tls_demultiplexer, tunnel};
-use crate::net_utils::PeerAddr;
-use crate::tls_demultiplexer::TlsDemux;
 use crate::forwarder::Forwarder;
 use crate::http1_codec::Http1Codec;
 use crate::http2_codec::Http2Codec;
@@ -16,13 +7,24 @@ use crate::http_codec::HttpCodec;
 use crate::http_downstream::HttpDownstream;
 use crate::icmp_forwarder::IcmpForwarder;
 use crate::metrics::Metrics;
+use crate::net_utils::PeerAddr;
 use crate::quic_multiplexer::{QuicMultiplexer, QuicSocket};
 use crate::settings::{ForwardProtocolSettings, Settings};
 use crate::shutdown::Shutdown;
 use crate::socks5_forwarder::Socks5Forwarder;
+use crate::tls_demultiplexer::TlsDemux;
 use crate::tls_listener::{TlsAcceptor, TlsListener};
 use crate::tunnel::Tunnel;
-
+use crate::{
+    authentication, http_ping_handler, http_speedtest_handler, log_id, log_utils, metrics,
+    net_utils, reverse_proxy, rules, settings, tls_demultiplexer, tunnel,
+};
+use std::io;
+use std::io::ErrorKind;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, UdpSocket};
 
 #[derive(Debug)]
 pub enum Error {
@@ -37,7 +39,6 @@ pub enum Error {
 pub struct Core {
     context: Arc<Context>,
 }
-
 
 pub(crate) struct Context {
     pub settings: Arc<Settings>,
@@ -61,7 +62,9 @@ impl Core {
             settings.validate().map_err(Error::SettingsValidation)?;
         }
         if !tls_hosts_settings.is_built() {
-            tls_hosts_settings.validate().map_err(Error::SettingsValidation)?;
+            tls_hosts_settings
+                .validate()
+                .map_err(Error::SettingsValidation)?;
         }
 
         let settings = Arc::new(settings);
@@ -72,7 +75,7 @@ impl Core {
                 authenticator,
                 tls_demux: Arc::new(RwLock::new(
                     TlsDemux::new(&settings, &tls_hosts_settings)
-                        .map_err(|e| Error::TlsDemultiplexer(e.to_string()))?
+                        .map_err(|e| Error::TlsDemultiplexer(e.to_string()))?,
                 )),
                 icmp_forwarder: if settings.icmp.is_none() {
                     None
@@ -90,22 +93,26 @@ impl Core {
     /// Run an endpoint instance inside the caller provided asynchronous runtime.
     pub async fn listen(&self) -> io::Result<()> {
         let listen_tcp = async {
-            self.listen_tcp().await
+            self.listen_tcp()
+                .await
                 .map_err(|e| io::Error::new(e.kind(), format!("TCP listener failure: {}", e)))
         };
 
         let listen_udp = async {
-            self.listen_udp().await
+            self.listen_udp()
+                .await
                 .map_err(|e| io::Error::new(e.kind(), format!("UDP listener failure: {}", e)))
         };
 
         let listen_icmp = async {
-            self.listen_icmp().await
+            self.listen_icmp()
+                .await
                 .map_err(|e| io::Error::new(e.kind(), format!("ICMP listener failure: {}", e)))
         };
 
         let listen_metrics = async {
-            metrics::listen(self.context.clone(), log_utils::IdChain::empty()).await
+            metrics::listen(self.context.clone(), log_utils::IdChain::empty())
+                .await
                 .map_err(|e| io::Error::new(e.kind(), format!("Metrics listener failure: {}", e)))
         };
 
@@ -113,8 +120,9 @@ impl Core {
             let shutdown = self.context.shutdown.lock().unwrap();
             (
                 shutdown.notification_handler(),
-                shutdown.completion_guard()
-                    .ok_or_else(|| io::Error::new(ErrorKind::Other, "Shutdown is already submitted"))?
+                shutdown.completion_guard().ok_or_else(|| {
+                    io::Error::new(ErrorKind::Other, "Shutdown is already submitted")
+                })?,
             )
         };
 
@@ -132,14 +140,19 @@ impl Core {
     }
 
     /// Reload the TLS hosts settings
-    pub fn reload_tls_hosts_settings(&self, settings: settings::TlsHostsSettings) -> io::Result<()> {
+    pub fn reload_tls_hosts_settings(
+        &self,
+        settings: settings::TlsHostsSettings,
+    ) -> io::Result<()> {
         let mut demux = self.context.tls_demux.write().unwrap();
 
         if !settings.is_built() {
-            settings.validate()
-                .map_err(|e| io::Error::new(
-                    ErrorKind::Other, format!("Settings validation failure: {:?}", e),
-                ))?;
+            settings.validate().map_err(|e| {
+                io::Error::new(
+                    ErrorKind::Other,
+                    format!("Settings validation failure: {:?}", e),
+                )
+            })?;
         }
 
         *demux = TlsDemux::new(&self.context.settings, &settings)?;
@@ -148,8 +161,8 @@ impl Core {
 
     async fn listen_tcp(&self) -> io::Result<()> {
         let settings = self.context.settings.clone();
-        let has_tcp_based_codec = settings.listen_protocols.http1.is_some()
-            || settings.listen_protocols.http2.is_some();
+        let has_tcp_based_codec =
+            settings.listen_protocols.http1.is_some() || settings.listen_protocols.http2.is_some();
 
         let tcp_listener = TcpListener::bind(settings.listen_address).await?;
         info!("Listening to TCP {}", settings.listen_address);
@@ -157,19 +170,20 @@ impl Core {
         let tls_listener = Arc::new(TlsListener::new());
         loop {
             let client_id = log_utils::IdChain::from(log_utils::IdItem::new(
-                log_utils::CLIENT_ID_FMT, self.context.next_client_id.fetch_add(1, Ordering::Relaxed),
+                log_utils::CLIENT_ID_FMT,
+                self.context.next_client_id.fetch_add(1, Ordering::Relaxed),
             ));
-            let (stream, client_addr) = match tcp_listener.accept().await
-                .and_then(|(s, a)| {
-                    s.set_nodelay(true)?;
-                    Ok((s, a))
-                })
-            {
-                Ok((stream, addr)) => if has_tcp_based_codec {
-                    log_id!(debug, client_id, "New TCP client: {}", addr);
-                    (stream, addr)
-                } else {
-                    continue; // accept just for pings
+            let (stream, client_addr) = match tcp_listener.accept().await.and_then(|(s, a)| {
+                s.set_nodelay(true)?;
+                Ok((s, a))
+            }) {
+                Ok((stream, addr)) => {
+                    if has_tcp_based_codec {
+                        log_id!(debug, client_id, "New TCP client: {}", addr);
+                        (stream, addr)
+                    } else {
+                        continue; // accept just for pings
+                    }
                 }
                 Err(e) => {
                     log_id!(debug, client_id, "TCP connection failed: {}", e);
@@ -186,12 +200,18 @@ impl Core {
                         .await
                         .unwrap_or_else(|_| Err(io::Error::from(ErrorKind::TimedOut)))
                     {
-                        Ok(acceptor) =>
+                        Ok(acceptor) => {
                             if let Err((client_id, message)) = Core::on_new_tls_connection(
-                                context.clone(), acceptor, client_addr.ip(), client_id,
-                            ).await {
+                                context.clone(),
+                                acceptor,
+                                client_addr.ip(),
+                                client_id,
+                            )
+                            .await
+                            {
                                 log_id!(debug, client_id, "{}", message);
-                            },
+                            }
+                        }
                         Err(e) => log_id!(trace, client_id, "TLS handshake failed: {}", e),
                     }
                 }
@@ -246,31 +266,60 @@ impl Core {
     ) -> Result<(), (log_utils::IdChain<u64>, String)> {
         let sni = match acceptor.sni() {
             Some(s) => s,
-            None => return Err((client_id, "Drop TLS connection due to absence of SNI".to_string())),
+            None => {
+                return Err((
+                    client_id,
+                    "Drop TLS connection due to absence of SNI".to_string(),
+                ))
+            }
         };
         // Apply connection filtering rules
         if let Err(deny_reason) = Self::evaluate_connection_rules(
-            &context, Some(client_ip), acceptor.client_random().as_deref(), &client_id
+            &context,
+            Some(client_ip),
+            acceptor.client_random().as_deref(),
+            &client_id,
         ) {
             return Err((client_id, deny_reason));
         }
 
         let core_settings = context.settings.clone();
-        let tls_connection_meta =
-            match context.tls_demux.read().unwrap().select(acceptor.alpn().iter().map(Vec::as_slice), sni) {
-                Ok(x) if x.protocol == tls_demultiplexer::Protocol::Http3 =>
-                    return Err((client_id, format!("Dropping connection due to unexpected protocol: {:?}", x))),
-                Ok(x) => x,
-                Err(e) => return Err((client_id, format!("Dropping connection due to error: {}", e))),
-            };
-        log_id!(debug, client_id, "Connection meta: {:?}", tls_connection_meta);
+        let tls_connection_meta = match context
+            .tls_demux
+            .read()
+            .unwrap()
+            .select(acceptor.alpn().iter().map(Vec::as_slice), sni)
+        {
+            Ok(x) if x.protocol == tls_demultiplexer::Protocol::Http3 => {
+                return Err((
+                    client_id,
+                    format!("Dropping connection due to unexpected protocol: {:?}", x),
+                ))
+            }
+            Ok(x) => x,
+            Err(e) => {
+                return Err((
+                    client_id,
+                    format!("Dropping connection due to error: {}", e),
+                ))
+            }
+        };
+        log_id!(
+            debug,
+            client_id,
+            "Connection meta: {:?}",
+            tls_connection_meta
+        );
 
-        let stream = match acceptor.accept(
-            tls_connection_meta.protocol,
-            tls_connection_meta.cert_chain,
-            tls_connection_meta.key,
-            &client_id,
-        ).await {
+        let stream = match acceptor
+            .accept(
+                tls_connection_meta.protocol,
+                tls_connection_meta.cert_chain,
+                tls_connection_meta.key,
+                &client_id,
+            )
+            .await
+        {
             Ok(s) => {
                 log_id!(debug, client_id, "New TLS client: {:?}", s);
                 s
@@ -283,57 +332,88 @@ impl Core {
         match tls_connection_meta.channel {
             net_utils::Channel::Tunnel => {
                 let tunnel_id = client_id.extended(log_utils::IdItem::new(
-                    log_utils::TUNNEL_ID_FMT, context.next_tunnel_id.fetch_add(1, Ordering::Relaxed),
+                    log_utils::TUNNEL_ID_FMT,
+                    context.next_tunnel_id.fetch_add(1, Ordering::Relaxed),
                 ));
 
                 Self::on_tunnel_request(
                     context,
                     tls_connection_meta.protocol,
                     match Self::make_tcp_http_codec(
-                        tls_connection_meta.protocol, core_settings, stream, tunnel_id.clone(),
+                        tls_connection_meta.protocol,
+                        core_settings,
+                        stream,
+                        tunnel_id.clone(),
                     ) {
                         Ok(x) => x,
-                        Err(e) => return Err((client_id, format!("Failed to create HTTP codec: {}", e))),
+                        Err(e) => {
+                            return Err((client_id, format!("Failed to create HTTP codec: {}", e)))
+                        }
                     },
                     tls_connection_meta.sni,
                     tls_connection_meta.sni_auth_creds,
                     tunnel_id,
-                ).await
+                )
+                .await
             }
-            net_utils::Channel::Ping => http_ping_handler::listen(
-                context.shutdown.clone(),
-                match Self::make_tcp_http_codec(
-                    tls_connection_meta.protocol, core_settings, stream, client_id.clone(),
-                ) {
-                    Ok(x) => x,
-                    Err(e) => return Err((client_id, format!("Failed to create HTTP codec: {}", e))),
-                },
-                context.settings.tls_handshake_timeout,
-                client_id,
-            ).await,
-            net_utils::Channel::Speedtest => http_speedtest_handler::listen(
-                context.shutdown.clone(),
-                match Self::make_tcp_http_codec(
-                    tls_connection_meta.protocol, core_settings, stream, client_id.clone(),
-                ) {
-                    Ok(x) => x,
-                    Err(e) => return Err((client_id, format!("Failed to create HTTP codec: {}", e))),
-                },
-                context.settings.tls_handshake_timeout,
-                client_id,
-            ).await,
-            net_utils::Channel::ReverseProxy => reverse_proxy::listen(
-                core_settings.clone(),
-                context.shutdown.clone(),
-                match Self::make_tcp_http_codec(
-                    tls_connection_meta.protocol, core_settings, stream, client_id.clone(),
-                ) {
-                    Ok(x) => x,
-                    Err(e) => return Err((client_id, format!("Failed to create HTTP codec: {}", e))),
-                },
-                tls_connection_meta.sni,
-                client_id,
-            ).await,
+            net_utils::Channel::Ping => {
+                http_ping_handler::listen(
+                    context.shutdown.clone(),
+                    match Self::make_tcp_http_codec(
+                        tls_connection_meta.protocol,
+                        core_settings,
+                        stream,
+                        client_id.clone(),
+                    ) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            return Err((client_id, format!("Failed to create HTTP codec: {}", e)))
+                        }
+                    },
+                    context.settings.tls_handshake_timeout,
+                    client_id,
+                )
+                .await
+            }
+            net_utils::Channel::Speedtest => {
+                http_speedtest_handler::listen(
+                    context.shutdown.clone(),
+                    match Self::make_tcp_http_codec(
+                        tls_connection_meta.protocol,
+                        core_settings,
+                        stream,
+                        client_id.clone(),
+                    ) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            return Err((client_id, format!("Failed to create HTTP codec: {}", e)))
+                        }
+                    },
+                    context.settings.tls_handshake_timeout,
+                    client_id,
+                )
+                .await
+            }
+            net_utils::Channel::ReverseProxy => {
+                reverse_proxy::listen(
+                    core_settings.clone(),
+                    context.shutdown.clone(),
+                    match Self::make_tcp_http_codec(
+                        tls_connection_meta.protocol,
+                        core_settings,
+                        stream,
+                        client_id.clone(),
+                    ) {
+                        Ok(x) => x,
+                        Err(e) => {
+                            return Err((client_id, format!("Failed to create HTTP codec: {}", e)))
+                        }
+                    },
+                    tls_connection_meta.sni,
+                    client_id,
+                )
+                .await
+            }
         }
 
         Ok(())
@@ -347,21 +427,30 @@ impl Core {
         // Apply connection filtering rules
         let client_ip = socket.peer_addr().ok().map(|addr| addr.ip());
         let client_random = Some(socket.client_random());
-        
+
         if let Err(deny_reason) = Self::evaluate_connection_rules(
-            &context, client_ip, client_random.as_deref(), &client_id
+            &context,
+            client_ip,
+            client_random.as_deref(),
+            &client_id,
         ) {
             log_id!(debug, client_id, "{}", deny_reason);
             return; // Drop the connection
         }
 
         let tls_connection_meta = socket.tls_connection_meta();
-        log_id!(debug, client_id, "Connection meta: {:?}", tls_connection_meta);
+        log_id!(
+            debug,
+            client_id,
+            "Connection meta: {:?}",
+            tls_connection_meta
+        );
 
         match tls_connection_meta.channel {
             net_utils::Channel::Tunnel => {
                 let tunnel_id = client_id.extended(log_utils::IdItem::new(
-                    log_utils::TUNNEL_ID_FMT, context.next_tunnel_id.fetch_add(1, Ordering::Relaxed),
+                    log_utils::TUNNEL_ID_FMT,
+                    context.next_tunnel_id.fetch_add(1, Ordering::Relaxed),
                 ));
 
                 let sni = tls_connection_meta.sni.clone();
@@ -374,20 +463,27 @@ impl Core {
                     sni,
                     sni_auth_creds,
                     tunnel_id,
-                ).await
+                )
+                .await
             }
-            net_utils::Channel::Ping => http_ping_handler::listen(
-                context.shutdown.clone(),
-                Box::new(Http3Codec::new(socket, client_id.clone())),
-                context.settings.tls_handshake_timeout,
-                client_id,
-            ).await,
-            net_utils::Channel::Speedtest => http_speedtest_handler::listen(
-                context.shutdown.clone(),
-                Box::new(Http3Codec::new(socket, client_id.clone())),
-                context.settings.tls_handshake_timeout,
-                client_id,
-            ).await,
+            net_utils::Channel::Ping => {
+                http_ping_handler::listen(
+                    context.shutdown.clone(),
+                    Box::new(Http3Codec::new(socket, client_id.clone())),
+                    context.settings.tls_handshake_timeout,
+                    client_id,
+                )
+                .await
+            }
+            net_utils::Channel::Speedtest => {
+                http_speedtest_handler::listen(
+                    context.shutdown.clone(),
+                    Box::new(Http3Codec::new(socket, client_id.clone())),
+                    context.settings.tls_handshake_timeout,
+                    client_id,
+                )
+                .await
+            }
             net_utils::Channel::ReverseProxy => {
                 let sni = tls_connection_meta.sni.clone();
 
@@ -397,7 +493,8 @@ impl Core {
                     Box::new(Http3Codec::new(socket, client_id.clone())),
                     sni,
                     client_id,
-                ).await
+                )
+                .await
             }
         }
     }
@@ -414,7 +511,12 @@ impl Core {
                 let rule_result = rules_engine.evaluate(&ip, client_random);
                 match rule_result {
                     rules::RuleEvaluation::Deny => {
-                        log_id!(debug, log_id, "Connection denied by filtering rules for IP: {}", ip);
+                        log_id!(
+                            debug,
+                            log_id,
+                            "Connection denied by filtering rules for IP: {}",
+                            ip
+                        );
                         return Err("Connection denied by filtering rules".to_string());
                     }
                     rules::RuleEvaluation::Allow => {
@@ -422,7 +524,11 @@ impl Core {
                     }
                 }
             } else {
-                log_id!(warn, log_id, "Could not extract client IP for rules evaluation");
+                log_id!(
+                    warn,
+                    log_id,
+                    "Could not extract client IP for rules evaluation"
+                );
             }
         }
         Ok(())
@@ -443,7 +549,9 @@ impl Core {
             Some((authenticator, credentials)) => {
                 let auth = authentication::Source::Sni(credentials.into());
                 match authenticator.authenticate(&auth, &tunnel_id) {
-                    authentication::Status::Pass => tunnel::AuthenticationPolicy::Authenticated(auth),
+                    authentication::Status::Pass => {
+                        tunnel::AuthenticationPolicy::Authenticated(auth)
+                    }
                     authentication::Status::Reject => {
                         log_id!(debug, tunnel_id, "SNI authentication failed");
                         return;
@@ -479,15 +587,16 @@ impl Core {
         io: IO,
         log_id: log_utils::IdChain<u64>,
     ) -> io::Result<Box<dyn HttpCodec>>
-        where IO: 'static + AsyncRead + AsyncWrite + Unpin + Send + PeerAddr
+    where
+        IO: 'static + AsyncRead + AsyncWrite + Unpin + Send + PeerAddr,
     {
         match protocol {
-            tls_demultiplexer::Protocol::Http1 => Ok(Box::new(Http1Codec::new(
-                core_settings, io, log_id,
-            ))),
-            tls_demultiplexer::Protocol::Http2 => Ok(Box::new(Http2Codec::new(
-                core_settings, io, log_id,
-            )?)),
+            tls_demultiplexer::Protocol::Http1 => {
+                Ok(Box::new(Http1Codec::new(core_settings, io, log_id)))
+            }
+            tls_demultiplexer::Protocol::Http2 => {
+                Ok(Box::new(Http2Codec::new(core_settings, io, log_id)?))
+            }
             tls_demultiplexer::Protocol::Http3 => unreachable!(),
         }
     }
@@ -508,7 +617,7 @@ impl Default for Context {
             settings: settings.clone(),
             authenticator: None,
             tls_demux: Arc::new(RwLock::new(
-                TlsDemux::new(&settings, &settings::TlsHostsSettings::default()).unwrap()
+                TlsDemux::new(&settings, &settings::TlsHostsSettings::default()).unwrap(),
             )),
             icmp_forwarder: None,
             shutdown: Shutdown::new(),

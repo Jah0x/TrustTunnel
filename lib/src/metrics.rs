@@ -1,20 +1,18 @@
-use std::io;
-use std::io::ErrorKind;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use bytes::Bytes;
-use prometheus::Encoder;
-use tokio::net::{TcpListener, TcpStream};
-use crate::{core, http_codec, log_id, log_utils};
-use crate::tls_demultiplexer::Protocol;
 use crate::http1_codec::Http1Codec;
 use crate::http_codec::HttpCodec;
-
+use crate::tls_demultiplexer::Protocol;
+use crate::{core, http_codec, log_id, log_utils};
+use bytes::Bytes;
+use prometheus::Encoder;
+use std::io;
+use std::io::ErrorKind;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use tokio::net::{TcpListener, TcpStream};
 
 const LOG_FMT: &str = "METRICS={}";
 const HEALTH_CHECK_PATH: &str = "/health-check";
 const METRICS_PATH: &str = "/metrics";
-
 
 pub(crate) struct Metrics {
     _registry: prometheus::Registry,
@@ -28,7 +26,6 @@ pub(crate) struct ClientSessionsCounter {
     protocol: Protocol,
 }
 
-
 impl Metrics {
     pub fn new() -> io::Result<Arc<Self>> {
         let registry = prometheus::Registry::new();
@@ -38,19 +35,22 @@ impl Metrics {
                 "Number of active client sessions",
                 &["protocol_type"],
                 registry,
-            ).map_err(prometheus_to_io_error)?,
+            )
+            .map_err(prometheus_to_io_error)?,
             inbound_traffic: prometheus::register_int_counter_vec_with_registry!(
                 "inbound_traffic_bytes",
                 "Total number of bytes uploaded by clients",
                 &["protocol_type"],
                 registry,
-            ).map_err(prometheus_to_io_error)?,
+            )
+            .map_err(prometheus_to_io_error)?,
             outbound_traffic: prometheus::register_int_counter_vec_with_registry!(
                 "outbound_traffic_bytes",
                 "Total number of bytes downloaded by clients",
                 &["protocol_type"],
                 registry,
-            ).map_err(prometheus_to_io_error)?,
+            )
+            .map_err(prometheus_to_io_error)?,
             _registry: registry,
         }))
     }
@@ -60,11 +60,15 @@ impl Metrics {
     }
 
     pub fn add_inbound_bytes(&self, protocol: Protocol, n: usize) {
-        self.inbound_traffic.with_label_values(&[protocol.as_str()]).inc_by(n as u64);
+        self.inbound_traffic
+            .with_label_values(&[protocol.as_str()])
+            .inc_by(n as u64);
     }
 
     pub fn add_outbound_bytes(&self, protocol: Protocol, n: usize) {
-        self.outbound_traffic.with_label_values(&[protocol.as_str()]).inc_by(n as u64);
+        self.outbound_traffic
+            .with_label_values(&[protocol.as_str()])
+            .inc_by(n as u64);
     }
 
     fn collect(&self) -> (String, Bytes) {
@@ -80,18 +84,21 @@ impl Metrics {
 
 impl ClientSessionsCounter {
     fn new(metrics: Arc<Metrics>, protocol: Protocol) -> Self {
-        metrics.client_sessions.with_label_values(&[protocol.as_str()]).inc();
+        metrics
+            .client_sessions
+            .with_label_values(&[protocol.as_str()])
+            .inc();
 
-        Self {
-            metrics,
-            protocol,
-        }
+        Self { metrics, protocol }
     }
 }
 
 impl Drop for ClientSessionsCounter {
     fn drop(&mut self) {
-        self.metrics.client_sessions.with_label_values(&[self.protocol.as_str()]).dec();
+        self.metrics
+            .client_sessions
+            .with_label_values(&[self.protocol.as_str()])
+            .dec();
     }
 }
 
@@ -130,17 +137,20 @@ async fn listen_inner(
     loop {
         let (stream, peer) = listener.accept().await?;
         let log_id = log_chain.extended(log_utils::IdItem::new(
-            LOG_FMT, next_id.fetch_add(1, Ordering::Relaxed)
+            LOG_FMT,
+            next_id.fetch_add(1, Ordering::Relaxed),
         ));
         log_id!(trace, log_id, "New connection from {}", peer);
         let context = context.clone();
-        tokio::spawn(async move {
-            handle_request(context, stream, log_id).await
-        });
+        tokio::spawn(async move { handle_request(context, stream, log_id).await });
     }
 }
 
-async fn handle_request(context: Arc<core::Context>, io: TcpStream, log_id: log_utils::IdChain<u64>) {
+async fn handle_request(
+    context: Arc<core::Context>,
+    io: TcpStream,
+    log_id: log_utils::IdChain<u64>,
+) {
     let mut codec = Http1Codec::new(context.settings.clone(), io, log_id.clone());
     let timeout = context.settings.metrics.as_ref().unwrap().request_timeout;
     let stream = match tokio::time::timeout(timeout, codec.listen()).await {
@@ -157,7 +167,11 @@ async fn handle_request(context: Arc<core::Context>, io: TcpStream, log_id: log_
             return;
         }
         Err(_elapsed) => {
-            log_id!(debug, log_id, "Didn't receive any request during configured period");
+            log_id!(
+                debug,
+                log_id,
+                "Didn't receive any request during configured period"
+            );
             return;
         }
     };
@@ -165,10 +179,11 @@ async fn handle_request(context: Arc<core::Context>, io: TcpStream, log_id: log_
     let dispatch = async {
         match codec.listen().await {
             Ok(Some(x)) => log_id!(
-                    debug, log_id,
-                    "Got unexpected request while processing previous: {:?}",
-                    x.request().request(),
-                ),
+                debug,
+                log_id,
+                "Got unexpected request while processing previous: {:?}",
+                x.request().request(),
+            ),
             Ok(None) => (),
             Err(e) => log_id!(debug, log_id, "IO error during processing: {}", e),
         }
@@ -182,7 +197,9 @@ async fn handle_request(context: Arc<core::Context>, io: TcpStream, log_id: log_
             x => {
                 log_id!(debug, log_id, "Unexpected path: {}", x);
                 let respond = stream.split().1;
-                if let Err(e) = respond.send_bad_response(http::status::StatusCode::BAD_REQUEST, vec![]) {
+                if let Err(e) =
+                    respond.send_bad_response(http::status::StatusCode::BAD_REQUEST, vec![])
+                {
                     log_id!(debug, log_id, "Failed to send response: {}", e);
                 }
                 return;
@@ -220,9 +237,12 @@ async fn handle_metrics_collect(
         .header(http::header::CONTENT_LENGTH, content.len())
         .body(())
         .unwrap()
-        .into_parts().0;
+        .into_parts()
+        .0;
 
-    let mut sink = stream.split().1
+    let mut sink = stream
+        .split()
+        .1
         .send_response(response, false)?
         .into_pipe_sink();
 
@@ -233,7 +253,6 @@ async fn handle_metrics_collect(
 
     sink.eof()
 }
-
 
 fn prometheus_to_io_error(e: prometheus::Error) -> io::Error {
     match e {

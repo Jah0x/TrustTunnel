@@ -1,6 +1,6 @@
+use http::Request;
 use std::net::SocketAddr;
 use std::time::Duration;
-use http::Request;
 use trusttunnel::net_utils;
 
 #[allow(dead_code)]
@@ -73,102 +73,156 @@ upload_tests! {
     path_h3_upload: path_h3_upload_client, 26,
 }
 
-async fn sni_h1_download_client(endpoint_address: &SocketAddr, body_size_mb: usize) -> (http::StatusCode, usize) {
+async fn sni_h1_download_client(
+    endpoint_address: &SocketAddr,
+    body_size_mb: usize,
+) -> (http::StatusCode, usize) {
     let stream = common::establish_tls_connection(
         &format!("speed.{}", common::MAIN_DOMAIN_NAME),
         endpoint_address,
         None,
-    ).await;
+    )
+    .await;
 
     let (response, body) = common::do_get_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://speed.{}:{}/{}mb.bin", common::MAIN_DOMAIN_NAME, endpoint_address.port(), body_size_mb),
+        &format!(
+            "https://speed.{}:{}/{}mb.bin",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port(),
+            body_size_mb
+        ),
         &[],
-    ).await;
+    )
+    .await;
 
     (response.status, body.len())
 }
 
-async fn sni_h2_download_client(endpoint_address: &SocketAddr, body_size_mb: usize) -> (http::StatusCode, usize) {
+async fn sni_h2_download_client(
+    endpoint_address: &SocketAddr,
+    body_size_mb: usize,
+) -> (http::StatusCode, usize) {
     let stream = common::establish_tls_connection(
         &format!("speed.{}", common::MAIN_DOMAIN_NAME),
         endpoint_address,
         Some(net_utils::HTTP2_ALPN.as_bytes()),
-    ).await;
+    )
+    .await;
 
     let (response, body) = common::do_get_request(
         stream,
         http::Version::HTTP_2,
-        &format!("https://speed.{}:{}/{}mb.bin", common::MAIN_DOMAIN_NAME, endpoint_address.port(), body_size_mb),
+        &format!(
+            "https://speed.{}:{}/{}mb.bin",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port(),
+            body_size_mb
+        ),
         &[],
-    ).await;
+    )
+    .await;
 
     (response.status, body.len())
 }
 
-async fn sni_h3_download_client(endpoint_address: &SocketAddr, body_size_mb: usize) -> (http::StatusCode, usize) {
+async fn sni_h3_download_client(
+    endpoint_address: &SocketAddr,
+    body_size_mb: usize,
+) -> (http::StatusCode, usize) {
     let mut conn = common::Http3Session::connect(
         endpoint_address,
         &format!("speed.{}", common::MAIN_DOMAIN_NAME),
         None,
-    ).await;
+    )
+    .await;
 
-    let (response, content) = conn.exchange(
-        Request::get(
-            &format!("https://{}:{}/speed/{}mb.bin", common::MAIN_DOMAIN_NAME, endpoint_address.port(), body_size_mb),
-        ).body(hyper::Body::empty()).unwrap()
-    ).await;
+    let (response, content) = conn
+        .exchange(
+            Request::get(&format!(
+                "https://{}:{}/speed/{}mb.bin",
+                common::MAIN_DOMAIN_NAME,
+                endpoint_address.port(),
+                body_size_mb
+            ))
+            .body(hyper::Body::empty())
+            .unwrap(),
+        )
+        .await;
 
     (response.status, content.len())
 }
 
-async fn path_h1_download_client(endpoint_address: &SocketAddr, body_size_mb: usize) -> (http::StatusCode, usize) {
-    let stream = common::establish_tls_connection(
-        common::MAIN_DOMAIN_NAME,
-        endpoint_address,
-        None,
-    ).await;
+async fn path_h1_download_client(
+    endpoint_address: &SocketAddr,
+    body_size_mb: usize,
+) -> (http::StatusCode, usize) {
+    let stream =
+        common::establish_tls_connection(common::MAIN_DOMAIN_NAME, endpoint_address, None).await;
 
     let (response, body) = common::do_get_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://{}:{}/speed/{}mb.bin", common::MAIN_DOMAIN_NAME, endpoint_address.port(), body_size_mb),
+        &format!(
+            "https://{}:{}/speed/{}mb.bin",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port(),
+            body_size_mb
+        ),
         &[],
-    ).await;
+    )
+    .await;
 
     (response.status, body.len())
 }
 
-async fn path_h2_download_client(endpoint_address: &SocketAddr, body_size_mb: usize) -> (http::StatusCode, usize) {
+async fn path_h2_download_client(
+    endpoint_address: &SocketAddr,
+    body_size_mb: usize,
+) -> (http::StatusCode, usize) {
     let stream = common::establish_tls_connection(
         common::MAIN_DOMAIN_NAME,
         endpoint_address,
         Some(net_utils::HTTP2_ALPN.as_bytes()),
-    ).await;
+    )
+    .await;
 
     let (response, body) = common::do_get_request(
         stream,
         http::Version::HTTP_2,
-        &format!("https://{}:{}/speed/{}mb.bin", common::MAIN_DOMAIN_NAME, endpoint_address.port(), body_size_mb),
+        &format!(
+            "https://{}:{}/speed/{}mb.bin",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port(),
+            body_size_mb
+        ),
         &[],
-    ).await;
+    )
+    .await;
 
     (response.status, body.len())
 }
 
-async fn path_h3_download_client(endpoint_address: &SocketAddr, body_size_mb: usize) -> (http::StatusCode, usize) {
-    let mut conn = common::Http3Session::connect(
-        endpoint_address,
-        common::MAIN_DOMAIN_NAME,
-        None,
-    ).await;
+async fn path_h3_download_client(
+    endpoint_address: &SocketAddr,
+    body_size_mb: usize,
+) -> (http::StatusCode, usize) {
+    let mut conn =
+        common::Http3Session::connect(endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
 
-    let (response, content) = conn.exchange(
-        Request::get(
-            &format!("https://{}:{}/speed/{}mb.bin", common::MAIN_DOMAIN_NAME, endpoint_address.port(), body_size_mb),
-        ).body(hyper::Body::empty()).unwrap()
-    ).await;
+    let (response, content) = conn
+        .exchange(
+            Request::get(&format!(
+                "https://{}:{}/speed/{}mb.bin",
+                common::MAIN_DOMAIN_NAME,
+                endpoint_address.port(),
+                body_size_mb
+            ))
+            .body(hyper::Body::empty())
+            .unwrap(),
+        )
+        .await;
 
     (response.status, content.len())
 }
@@ -178,14 +232,21 @@ async fn sni_h1_upload_client(endpoint_address: &SocketAddr, body_size: usize) -
         &format!("speed.{}", common::MAIN_DOMAIN_NAME),
         endpoint_address,
         None,
-    ).await;
+    )
+    .await;
 
     common::do_post_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://speed.{}:{}/upload.html", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://speed.{}:{}/upload.html",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         body_size,
-    ).await.status()
+    )
+    .await
+    .status()
 }
 
 async fn sni_h2_upload_client(endpoint_address: &SocketAddr, body_size: usize) -> http::StatusCode {
@@ -193,14 +254,21 @@ async fn sni_h2_upload_client(endpoint_address: &SocketAddr, body_size: usize) -
         &format!("speed.{}", common::MAIN_DOMAIN_NAME),
         endpoint_address,
         Some(net_utils::HTTP2_ALPN.as_bytes()),
-    ).await;
+    )
+    .await;
 
     common::do_post_request(
         stream,
         http::Version::HTTP_2,
-        &format!("https://speed.{}:{}/upload.html", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://speed.{}:{}/upload.html",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         body_size,
-    ).await.status()
+    )
+    .await
+    .status()
 }
 
 async fn sni_h3_upload_client(endpoint_address: &SocketAddr, body_size: usize) -> http::StatusCode {
@@ -208,61 +276,86 @@ async fn sni_h3_upload_client(endpoint_address: &SocketAddr, body_size: usize) -
         endpoint_address,
         &format!("speed.{}", common::MAIN_DOMAIN_NAME),
         None,
-    ).await;
+    )
+    .await;
     conn.send_request(
-        Request::post(
-            &format!("https://speed.{}:{}/upload.html", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
-        )
-            .header(http::header::CONTENT_LENGTH, body_size.to_string())
-            .body(hyper::Body::from(vec![0; body_size])).unwrap()
-    ).await;
+        Request::post(&format!(
+            "https://speed.{}:{}/upload.html",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ))
+        .header(http::header::CONTENT_LENGTH, body_size.to_string())
+        .body(hyper::Body::from(vec![0; body_size]))
+        .unwrap(),
+    )
+    .await;
 
     conn.recv_response().await.status
 }
 
-async fn path_h1_upload_client(endpoint_address: &SocketAddr, body_size: usize) -> http::StatusCode {
-    let stream = common::establish_tls_connection(
-        common::MAIN_DOMAIN_NAME,
-        endpoint_address,
-        None,
-    ).await;
+async fn path_h1_upload_client(
+    endpoint_address: &SocketAddr,
+    body_size: usize,
+) -> http::StatusCode {
+    let stream =
+        common::establish_tls_connection(common::MAIN_DOMAIN_NAME, endpoint_address, None).await;
 
     common::do_post_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://{}:{}/speed/upload.html", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://{}:{}/speed/upload.html",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         body_size,
-    ).await.status()
+    )
+    .await
+    .status()
 }
 
-async fn path_h2_upload_client(endpoint_address: &SocketAddr, body_size: usize) -> http::StatusCode {
+async fn path_h2_upload_client(
+    endpoint_address: &SocketAddr,
+    body_size: usize,
+) -> http::StatusCode {
     let stream = common::establish_tls_connection(
         common::MAIN_DOMAIN_NAME,
         endpoint_address,
         Some(net_utils::HTTP2_ALPN.as_bytes()),
-    ).await;
+    )
+    .await;
 
     common::do_post_request(
         stream,
         http::Version::HTTP_2,
-        &format!("https://{}:{}/speed/upload.html", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://{}:{}/speed/upload.html",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         body_size,
-    ).await.status()
+    )
+    .await
+    .status()
 }
 
-async fn path_h3_upload_client(endpoint_address: &SocketAddr, body_size: usize) -> http::StatusCode {
-    let mut conn = common::Http3Session::connect(
-        endpoint_address,
-        common::MAIN_DOMAIN_NAME,
-        None,
-    ).await;
+async fn path_h3_upload_client(
+    endpoint_address: &SocketAddr,
+    body_size: usize,
+) -> http::StatusCode {
+    let mut conn =
+        common::Http3Session::connect(endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
     conn.send_request(
-        Request::post(
-            &format!("https://{}:{}/speed/upload.html", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
-        )
-            .header(http::header::CONTENT_LENGTH, body_size.to_string())
-            .body(hyper::Body::from(vec![0; body_size])).unwrap()
-    ).await;
+        Request::post(&format!(
+            "https://{}:{}/speed/upload.html",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ))
+        .header(http::header::CONTENT_LENGTH, body_size.to_string())
+        .body(hyper::Body::from(vec![0; body_size]))
+        .unwrap(),
+    )
+    .await;
 
     conn.recv_response().await.status
 }

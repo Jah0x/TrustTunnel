@@ -33,17 +33,17 @@ Increment version:
         scripts:
           - |-
             set -x -e
-            
+
             git config user.name "Bamboo"
             git config user.email "Bamboo"
-            
+
             if [ ${bamboo_custom_version} = "none" ]; then
                 bamboo_custom_version=
             fi
-            
+
             ../git-scripts/git_kit.sh pull ${bamboo_planRepository_repositoryUrl}
 
-            ./scripts/increment_version.sh ./endpoint/Cargo.toml ${bamboo_custom_version}
+            ./scripts/ci/increment_version.sh ./endpoint/Cargo.toml ${bamboo_custom_version}
             git add ./endpoint/Cargo.toml Cargo.lock CHANGELOG.md
 
             git commit -m "skipci: Automatic version increment by Bamboo"

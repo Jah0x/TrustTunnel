@@ -1,6 +1,6 @@
+use http::Request;
 use std::net::SocketAddr;
 use std::time::Duration;
-use http::Request;
 use trusttunnel::net_utils;
 
 #[allow(dead_code)]
@@ -47,14 +47,22 @@ async fn sni_h1_client(endpoint_address: &SocketAddr) -> http::StatusCode {
         &format!("ping.{}", common::MAIN_DOMAIN_NAME),
         endpoint_address,
         None,
-    ).await;
+    )
+    .await;
 
     common::do_get_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://ping.{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://ping.{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         &[],
-    ).await.0.status
+    )
+    .await
+    .0
+    .status
 }
 
 async fn sni_h2_client(endpoint_address: &SocketAddr) -> http::StatusCode {
@@ -62,14 +70,22 @@ async fn sni_h2_client(endpoint_address: &SocketAddr) -> http::StatusCode {
         &format!("ping.{}", common::MAIN_DOMAIN_NAME),
         endpoint_address,
         Some(net_utils::HTTP2_ALPN.as_bytes()),
-    ).await;
+    )
+    .await;
 
     common::do_get_request(
         stream,
         http::Version::HTTP_2,
-        &format!("https://ping.{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://ping.{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         &[],
-    ).await.0.status
+    )
+    .await
+    .0
+    .status
 }
 
 async fn sni_h3_client(endpoint_address: &SocketAddr) -> http::StatusCode {
@@ -77,30 +93,40 @@ async fn sni_h3_client(endpoint_address: &SocketAddr) -> http::StatusCode {
         endpoint_address,
         &format!("ping.{}", common::MAIN_DOMAIN_NAME),
         None,
-    ).await;
+    )
+    .await;
 
     conn.send_request(
-        Request::get(
-            format!("https://ping.{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port())
-        ).body(hyper::Body::empty()).unwrap()
-    ).await;
+        Request::get(format!(
+            "https://ping.{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ))
+        .body(hyper::Body::empty())
+        .unwrap(),
+    )
+    .await;
 
     conn.recv_response().await.status
 }
 
 async fn x_ping_h1_client(endpoint_address: &SocketAddr) -> http::StatusCode {
-    let stream = common::establish_tls_connection(
-        common::MAIN_DOMAIN_NAME,
-        endpoint_address,
-        None,
-    ).await;
+    let stream =
+        common::establish_tls_connection(common::MAIN_DOMAIN_NAME, endpoint_address, None).await;
 
     common::do_get_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         &[("x-ping", "1")],
-    ).await.0.status
+    )
+    .await
+    .0
+    .status
 }
 
 async fn x_ping_h2_client(endpoint_address: &SocketAddr) -> http::StatusCode {
@@ -108,42 +134,59 @@ async fn x_ping_h2_client(endpoint_address: &SocketAddr) -> http::StatusCode {
         common::MAIN_DOMAIN_NAME,
         endpoint_address,
         Some(net_utils::HTTP2_ALPN.as_bytes()),
-    ).await;
+    )
+    .await;
 
     common::do_get_request(
         stream,
         http::Version::HTTP_2,
-        &format!("https://{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         &[("x-ping", "1")],
-    ).await.0.status
+    )
+    .await
+    .0
+    .status
 }
 
 async fn x_ping_h3_client(endpoint_address: &SocketAddr) -> http::StatusCode {
-    let mut conn = common::Http3Session::connect(endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
+    let mut conn =
+        common::Http3Session::connect(endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
     conn.send_request(
-        Request::get(
-            format!("https://{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port())
-        )
-            .header("x-ping", "1")
-            .body(hyper::Body::empty()).unwrap()
-    ).await;
+        Request::get(format!(
+            "https://{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ))
+        .header("x-ping", "1")
+        .body(hyper::Body::empty())
+        .unwrap(),
+    )
+    .await;
 
     conn.recv_response().await.status
 }
 
 async fn navigate_h1_client(endpoint_address: &SocketAddr) -> http::StatusCode {
-    let stream = common::establish_tls_connection(
-        common::MAIN_DOMAIN_NAME,
-        endpoint_address,
-        None,
-    ).await;
+    let stream =
+        common::establish_tls_connection(common::MAIN_DOMAIN_NAME, endpoint_address, None).await;
 
     common::do_get_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         &[("sec-fetch-mode", "navigate")],
-    ).await.0.status
+    )
+    .await
+    .0
+    .status
 }
 
 async fn navigate_h2_client(endpoint_address: &SocketAddr) -> http::StatusCode {
@@ -151,25 +194,38 @@ async fn navigate_h2_client(endpoint_address: &SocketAddr) -> http::StatusCode {
         common::MAIN_DOMAIN_NAME,
         endpoint_address,
         Some(net_utils::HTTP2_ALPN.as_bytes()),
-    ).await;
+    )
+    .await;
 
     common::do_get_request(
         stream,
         http::Version::HTTP_2,
-        &format!("https://{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         &[("sec-fetch-mode", "navigate")],
-    ).await.0.status
+    )
+    .await
+    .0
+    .status
 }
 
 async fn navigate_h3_client(endpoint_address: &SocketAddr) -> http::StatusCode {
-    let mut conn = common::Http3Session::connect(endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
+    let mut conn =
+        common::Http3Session::connect(endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
     conn.send_request(
-        Request::get(
-            format!("https://{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port())
-        )
-            .header("sec-fetch-mode", "navigate")
-            .body(hyper::Body::empty()).unwrap()
-    ).await;
+        Request::get(format!(
+            "https://{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ))
+        .header("sec-fetch-mode", "navigate")
+        .body(hyper::Body::empty())
+        .unwrap(),
+    )
+    .await;
 
     conn.recv_response().await.status
 }

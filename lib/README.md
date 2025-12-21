@@ -4,19 +4,23 @@
 
 ### Prerequisites
 
-* Rust 1.85 or higher: use a preferred way from https://www.rust-lang.org/tools/install
-* libclang 9.0 or higher
+- Rust 1.85 or higher: use a preferred way from https://www.rust-lang.org/tools/install
+- libclang 9.0 or higher
 
 ### Building
 
 Execute the following commands in the Terminal:
+
 ```shell
 cargo build
 ```
+
 to build the debug version, or
+
 ```shell
 cargo build --release
 ```
+
 to build the release version.
 
 ## Features description
@@ -27,8 +31,9 @@ As for now, the endpoint can demultiplex client's connections multiplexed in eit
 HTTP/2, or HTTP/3 session. An application can set up how the endpoint forwards the demultiplexed
 client's connection by setting `Settings.forward_protocol`. The available options
 (see `settings.ForwardProtocolSettings`) are:
-* routing a connection directly to its target host
-* routing a connection though a SOCKS5 proxy
+
+- routing a connection directly to its target host
+- routing a connection though a SOCKS5 proxy
 
 #### ICMP forwarding
 
@@ -39,6 +44,7 @@ the ICMP socket to, and MAY tweak some other settings, like the timeouts and mes
 ### Reverse proxy
 
 Client's connection is treated as a reverse proxy stream in the following cases:
+
 1) A TLS session or QUIC connection has the SNI set to the host name equal to one
    from `TlsHostsSettings.reverse_proxy`.
 2) An HTTP/1.1 request has `Upgrade` header and its path starts with `ReverseProxySettings.path_mask`.
@@ -61,8 +67,9 @@ For now, its value can be either `HTTP1`, or `HTTP3`.
 ##### SNI authentication
 
 A client connects to the endpoint with SNI set to `hash.domain_name`, where:
-* `hash` - `md5(application_id + ':' + token + ':' + credentials)`
-* `domain_name` - the endpoint's original domain name (e.g. `myvpn.org`)
+
+- `hash` - `md5(application_id + ':' + token + ':' + credentials)`
+- `domain_name` - the endpoint's original domain name (e.g. `myvpn.org`)
 
 ##### Proxy authentication
 
@@ -75,12 +82,13 @@ An application can set up the authentication method being used by the endpoint
 by setting `Settings.authenticator`. The application can provide its own authenticator
 implementation (see the `authentication.Authenticator` trait), or use one of the implementations
 provided by the library:
-* `authentication.DummyAuthenticator` - authenticates any request
-* `authentication.file_based.FileBasedAuthenticator` - authenticates a request basing on
-  the file containing credentials (see [here](#file-based-authenticator))
-* `authentication.radius.RadiusAuthenticator` - delegates authentication to an authenticator
-  communicating with it by the RADIUS protocol (see [here](#radius-authenticator))
-* SOCKS5 authentication - delegates authentication to the SOCKS5 forwarder (see [here](#socks5-authenticator))
+
+- `authentication.DummyAuthenticator` - authenticates any request
+- `authentication.file_based.FileBasedAuthenticator` - authenticates a request basing on
+  the file containing credentials ([see here](#file-based-authenticator))
+- `authentication.radius.RadiusAuthenticator` - delegates authentication to an authenticator
+  communicating with it by the RADIUS protocol ([see here](#radius-authenticator))
+- SOCKS5 authentication - delegates authentication to the SOCKS5 forwarder ([see here](#socks5-authenticator))
 
 **Please note**, that the first 2 are very simple authenticator implementations which are intended
 mostly for testing purposes and do not respect network security practices.
@@ -118,13 +126,14 @@ sequenceDiagram
 ```
 
 Depending on the client-side authentication way, the `user_name` and `password` are as follows:
-* [SNI authentication](#sni-authentication):
-  * `user_name` = `sni@<id>@<hash[0..6]>` - a special value which indicates the authentication way
-    * `<id>` - the id of the current authentication session
-    * `<hash[0..6]>` - the first 6 characters of the SNI
-  * `password` = `hash` - corresponds to `hash`, as in [SNI authentication](#sni-authentication)
-* [Proxy authentication](#proxy-authentication):
-  * `user_name` and `password` correspond to `token` and `credentials`, as in [Proxy authentication](#proxy-authentication)
+
+- [SNI authentication](#sni-authentication):
+    - `user_name` = `sni@<id>@<hash[0..6]>` - a special value which indicates the authentication way
+        - `<id>` - the id of the current authentication session
+        - `<hash[0..6]>` - the first 6 characters of the SNI
+    - `password` = `hash` - corresponds to `hash`, as in [SNI authentication](#sni-authentication)
+- [Proxy authentication](#proxy-authentication):
+    - `user_name` and `password` correspond to `token` and `credentials`, as in [Proxy authentication](#proxy-authentication)
 
 The endpoint caches the authentication status and repeats the procedure for the client after
 the cache TTL (see `RadiusAuthenticatorSettings.cache_ttl`).
@@ -138,51 +147,58 @@ the standard authentication procedure according to the
 [RFC 1929](https://datatracker.ietf.org/doc/html/rfc1929).
 
 Depending on the client-side authentication way, the username and password are as follows:
-* [SNI authentication](#sni-authentication):
-  * both `username` and `password` = `hash` - corresponds to `hash`, as in 
+
+- [SNI authentication](#sni-authentication):
+    - both `username` and `password` = `hash` - corresponds to `hash`, as in
     [SNI authentication](#sni-authentication)
 
-* [Proxy authentication](#proxy-authentication):
-  * `username` corresponds to `token`, as in [Proxy authentication](#proxy-authentication)
-  * `password` corresponds to `credentials`, as in [Proxy authentication](#proxy-authentication)
+- [Proxy authentication](#proxy-authentication):
+    - `username` corresponds to `token`, as in [Proxy authentication](#proxy-authentication)
+    - `password` corresponds to `credentials`, as in [Proxy authentication](#proxy-authentication)
 
 ###### Extended authentication
 
 The extended authentication uses `0x80` as an authentication method.
 After a server selects this authentication method, a client sends an authentication
 request in the following format:
-```
+
+```text
 +-----+-----------+-----+--------+
 | VER |   EXT(0)  |     | EXT(n) |
 +-----+-----------+ ... +--------+
 |  1  | see below |     |        |
 +-----+-----------+-----+--------+
 ```
+
 Where:
- * `VER` - the current extended authentication version: 0x01
- * `EXT[i]` - an extension in the following format:
-   ```
+
+- `VER` - the current extended authentication version: 0x01
+- `EXT[i]` - an extension in the following format:
+
+   ```text
    +------+--------+----------+
    | TYPE | LENGTH |   VALUE  |
    +------+--------+----------+
    |  1   |    2   | Variable |
    +------+--------+----------+
    ```
+
    Where:
-    * `TYPE` - a type of the extension value (see [`ExtendedAuthenticationValue`])
-    * `LENGTH` - the length of the extension value
-    * `VALUE` - the extension value
+    - `TYPE` - a type of the extension value (see [`ExtendedAuthenticationValue`])
+    - `LENGTH` - the length of the extension value
+    - `VALUE` - the extension value
 
 Available extensions:
-* `TERM`: type = 0x00, length = 0 - terminating extension, marks a message end
-* `DOMAIN`: type = 0x01, length = (0..MAX], value = UTF-8 string - hostname which
+
+- `TERM`: type = 0x00, length = 0 - terminating extension, marks a message end
+- `DOMAIN`: type = 0x01, length = (0..MAX], value = UTF-8 string - hostname which
   a client used for the TLS session (SNI)
-* `CLIENT_ADDRESS`: type = 0x02, length = [4|16], value = Bytes - public IP
+- `CLIENT_ADDRESS`: type = 0x02, length = [4|16], value = Bytes - public IP
   address of the VPN client
-* `USER_AGENT`: type = 0x03, length = (0..MAX], value = UTF-8 string - user agent of the VPN client
-* `PROXY_AUTH`: type = 0x04, length = (0..MAX], value = base64 string - `<credentials>` part of 
+- `USER_AGENT`: type = 0x03, length = (0..MAX], value = UTF-8 string - user agent of the VPN client
+- `PROXY_AUTH`: type = 0x04, length = (0..MAX], value = base64 string - `<credentials>` part of
   [the Proxy-Authorization header](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Proxy-Authorization)
-* `SNI_AUTH`: type = 0x05, length = 0 - marks that the VPN client tries to authenticate using SNI
+- `SNI_AUTH`: type = 0x05, length = 0 - marks that the VPN client tries to authenticate using SNI
 
 A message **MUST** end with the `TERM` extension.
 
@@ -194,8 +210,9 @@ In order to collect some metrics of a running endpoint, an application can set u
 the metrics collecting requests (see `Settings.metrics`). An endpoint running with this feature
 will listen on the configured address (`MetricsSettings.address`) for plain HTTP/1 requests.
 The following paths are available:
-* `/health-check` - used for pinging the endpoint, so it will respond with `200 OK`
-* `/metrics` - used for metrics collecting, so it will respond with a bunch of values according to
+
+- `/health-check` - used for pinging the endpoint, so it will respond with `200 OK`
+- `/metrics` - used for metrics collecting, so it will respond with a bunch of values according to
   [the prometheus specification](https://prometheus.io/)
 
 ## License

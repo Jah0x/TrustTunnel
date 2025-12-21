@@ -1,13 +1,20 @@
-use std::iter::once;
-use toml_edit::{Document, value};
-use trusttunnel::settings::{ForwardProtocolSettings, Http1Settings, Http2Settings, IcmpSettings, ListenProtocolSettings, MetricsSettings, QuicSettings, Settings};
-use trusttunnel::utils::{IterJoin, ToTomlComment};
 use crate::template_settings;
+use std::iter::once;
+use toml_edit::{value, Document};
+use trusttunnel::settings::{
+    ForwardProtocolSettings, Http1Settings, Http2Settings, IcmpSettings, ListenProtocolSettings,
+    MetricsSettings, QuicSettings, Settings,
+};
+use trusttunnel::utils::{IterJoin, ToTomlComment};
 
 pub fn compose_document(settings: &Settings, credentials_path: &str, rules_path: &str) -> String {
     once(compose_main_table(settings, credentials_path, rules_path))
-        .chain(once(compose_forward_protocol_table(settings.get_forward_protocol())))
-        .chain(once(compose_listener_protocol_table(settings.get_listen_protocols())))
+        .chain(once(compose_forward_protocol_table(
+            settings.get_forward_protocol(),
+        )))
+        .chain(once(compose_listener_protocol_table(
+            settings.get_listen_protocols(),
+        )))
         .chain(once(compose_icmp_table(settings.get_icmp().as_ref())))
         .chain(once(compose_metrics_table(settings.get_metrics().as_ref())))
         .join("\n")
@@ -20,12 +27,18 @@ fn compose_main_table(settings: &Settings, credentials_path: &str, rules_path: &
     doc["credentials_file"] = value(credentials_path);
     doc["rules_file"] = value(rules_path);
     doc["ipv6_available"] = value(*settings.get_ipv6_available());
-    doc["allow_private_network_connections"] = value(*settings.get_allow_private_network_connections());
-    doc["tls_handshake_timeout_secs"] = value(settings.get_tls_handshake_timeout().as_secs() as i64);
-    doc["client_listener_timeout_secs"] = value(settings.get_client_listener_timeout().as_secs() as i64);
-    doc["connection_establishment_timeout_secs"] = value(settings.get_connection_establishment_timeout().as_secs() as i64);
-    doc["tcp_connections_timeout_secs"] = value(settings.get_tcp_connections_timeout().as_secs() as i64);
-    doc["udp_connections_timeout_secs"] = value(settings.get_udp_connections_timeout().as_secs() as i64);
+    doc["allow_private_network_connections"] =
+        value(*settings.get_allow_private_network_connections());
+    doc["tls_handshake_timeout_secs"] =
+        value(settings.get_tls_handshake_timeout().as_secs() as i64);
+    doc["client_listener_timeout_secs"] =
+        value(settings.get_client_listener_timeout().as_secs() as i64);
+    doc["connection_establishment_timeout_secs"] =
+        value(settings.get_connection_establishment_timeout().as_secs() as i64);
+    doc["tcp_connections_timeout_secs"] =
+        value(settings.get_tcp_connections_timeout().as_secs() as i64);
+    doc["udp_connections_timeout_secs"] =
+        value(settings.get_udp_connections_timeout().as_secs() as i64);
 
     doc.to_string()
 }
@@ -42,7 +55,11 @@ fn compose_forward_protocol_table(settings: &ForwardProtocolSettings) -> String 
         }
     };
 
-    format!("{}\n{}", *template_settings::FORWARD_PROTOCOL_COMMON_TABLE, spec)
+    format!(
+        "{}\n{}",
+        *template_settings::FORWARD_PROTOCOL_COMMON_TABLE,
+        spec
+    )
 }
 
 fn compose_listener_protocol_table(settings: &ListenProtocolSettings) -> String {
@@ -73,7 +90,8 @@ fn compose_http2_listener_table(settings: Option<&Http2Settings>) -> String {
             let mut doc: Document = template_settings::HTTP2_LISTENER_TABLE.parse().unwrap();
             let table = doc["listen_protocols"]["http2"].as_table_mut().unwrap();
 
-            table["initial_connection_window_size"] = value(*x.get_initial_connection_window_size() as i64);
+            table["initial_connection_window_size"] =
+                value(*x.get_initial_connection_window_size() as i64);
             table["initial_stream_window_size"] = value(*x.get_initial_stream_window_size() as i64);
             table["max_concurrent_streams"] = value(*x.get_max_concurrent_streams() as i64);
             table["max_frame_size"] = value(*x.get_max_frame_size() as i64);
@@ -94,8 +112,10 @@ fn compose_quic_listener_table(settings: Option<&QuicSettings>) -> String {
             table["recv_udp_payload_size"] = value(*x.get_recv_udp_payload_size() as i64);
             table["send_udp_payload_size"] = value(*x.get_send_udp_payload_size() as i64);
             table["initial_max_data"] = value(*x.get_initial_max_data() as i64);
-            table["max_stream_data_bidi_local"] = value(*x.get_initial_max_stream_data_bidi_local() as i64);
-            table["max_stream_data_bidi_remote"] = value(*x.get_initial_max_stream_data_bidi_remote() as i64);
+            table["max_stream_data_bidi_local"] =
+                value(*x.get_initial_max_stream_data_bidi_local() as i64);
+            table["max_stream_data_bidi_remote"] =
+                value(*x.get_initial_max_stream_data_bidi_remote() as i64);
             table["max_stream_data_uni"] = value(*x.get_initial_max_stream_data_uni() as i64);
             table["max_streams_bidi"] = value(*x.get_initial_max_streams_bidi() as i64);
             table["max_streams_uni"] = value(*x.get_initial_max_streams_uni() as i64);
@@ -119,7 +139,8 @@ fn compose_icmp_table(settings: Option<&IcmpSettings>) -> String {
 
             table["interface_name"] = value(x.get_interface_name());
             table["request_timeout_secs"] = value(x.get_request_timeout().as_secs() as i64);
-            table["recv_message_queue_capacity"] = value(*x.get_recv_message_queue_capacity() as i64);
+            table["recv_message_queue_capacity"] =
+                value(*x.get_recv_message_queue_capacity() as i64);
 
             doc.to_string()
         }

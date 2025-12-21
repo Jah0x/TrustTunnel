@@ -1,7 +1,7 @@
+use crate::user_interaction::{ask_for_agreement, ask_for_input, checked_overwrite};
 use std::fs;
 use std::sync::{Mutex, MutexGuard};
 use trusttunnel::settings::{Settings, TlsHostsSettings};
-use crate::user_interaction::{ask_for_agreement, ask_for_input, checked_overwrite};
 
 mod composer;
 mod library_settings;
@@ -56,11 +56,13 @@ fn main() {
                 .action(clap::ArgAction::Set)
                 .value_parser(["interactive", MODE_NON_INTERACTIVE])
                 .default_value("interactive")
-                .help(r#"Available wizard running modes:
+                .help(
+                    r#"Available wizard running modes:
     * interactive - set up only the essential without deep diving into details
     * non-interactive - prepare the setup without interacting with a user,
                         requires some parameters set up via command-line arguments
-"#),
+"#,
+                ),
             clap::Arg::new(LISTEN_ADDRESS_PARAM_NAME)
                 .short('a')
                 .long("address")
@@ -74,16 +76,20 @@ fn main() {
                 .action(clap::ArgAction::Set)
                 .value_parser(clap::builder::NonEmptyStringValueParser::new())
                 .required_if_eq(MODE_PARAM_NAME, MODE_NON_INTERACTIVE)
-                .help(r#"A user credentials formatted as: <username>:<password>.
-Required in non-interactive mode."#),
+                .help(
+                    r#"A user credentials formatted as: <username>:<password>.
+Required in non-interactive mode."#,
+                ),
             clap::Arg::new(HOSTNAME_PARAM_NAME)
                 .short('n')
                 .long("hostname")
                 .action(clap::ArgAction::Set)
                 .value_parser(clap::builder::NonEmptyStringValueParser::new())
                 .required_if_eq(MODE_PARAM_NAME, MODE_NON_INTERACTIVE)
-                .help(r#"A hostname of the certificate for serving TLS connections.
-Required in non-interactive mode."#),
+                .help(
+                    r#"A hostname of the certificate for serving TLS connections.
+Required in non-interactive mode."#,
+                ),
             clap::Arg::new(LIBRARY_SETTINGS_FILE_PARAM_NAME)
                 .long("lib-settings")
                 .action(clap::ArgAction::Set)
@@ -95,7 +101,9 @@ Required in non-interactive mode."#),
                 .action(clap::ArgAction::Set)
                 .value_parser(clap::builder::NonEmptyStringValueParser::new())
                 .required_if_eq(MODE_PARAM_NAME, MODE_NON_INTERACTIVE)
-                .help("Path to store the TLS hosts settings file. Required in non-interactive mode."),
+                .help(
+                    "Path to store the TLS hosts settings file. Required in non-interactive mode.",
+                ),
         ])
         .get_matches();
 
@@ -108,61 +116,78 @@ Required in non-interactive mode."#),
 
     *PREDEFINED_PARAMS.lock().unwrap() = PredefinedParameters {
         listen_address: args.get_one::<String>(LISTEN_ADDRESS_PARAM_NAME).cloned(),
-        credentials: args.get_one::<String>(CREDENTIALS_PARAM_NAME)
+        credentials: args
+            .get_one::<String>(CREDENTIALS_PARAM_NAME)
             .map(|x| x.splitn(2, ':'))
             .and_then(|mut x| x.next().zip(x.next()))
             .map(|(a, b)| (a.to_string(), b.to_string())),
         hostname: args.get_one::<String>(HOSTNAME_PARAM_NAME).cloned(),
-        library_settings_file: args.get_one::<String>(LIBRARY_SETTINGS_FILE_PARAM_NAME).cloned(),
-        tls_hosts_settings_file: args.get_one::<String>(TLS_HOSTS_SETTINGS_FILE_PARAM_NAME).cloned(),
+        library_settings_file: args
+            .get_one::<String>(LIBRARY_SETTINGS_FILE_PARAM_NAME)
+            .cloned(),
+        tls_hosts_settings_file: args
+            .get_one::<String>(TLS_HOSTS_SETTINGS_FILE_PARAM_NAME)
+            .cloned(),
     };
 
     println!("Welcome to the setup wizard");
 
     let library_settings_path = find_existent_settings::<Settings>(".")
-        .and_then(|fname|
+        .and_then(|fname| {
             ask_for_agreement(&format!("Use the existing library settings {}?", fname))
                 .then_some(fname)
-        )
+        })
         .or_else(|| {
             println!("Let's build the library settings");
             let built = library_settings::build();
             println!("The library settings are successfully built\n");
 
-            let path = get_predefined_params().library_settings_file.clone()
-                .unwrap_or_else(|| ask_for_input::<String>(
-                    "Path to a file to store the library settings",
-                    Some("vpn.toml".into()),
-                ));
+            let path = get_predefined_params()
+                .library_settings_file
+                .clone()
+                .unwrap_or_else(|| {
+                    ask_for_input::<String>(
+                        "Path to a file to store the library settings",
+                        Some("vpn.toml".into()),
+                    )
+                });
             if checked_overwrite(&path, "Overwrite the existing library settings file?") {
-                let doc = composer::compose_document(&built.settings, &built.credentials_path, &built.rules_path);
-                fs::write(&path, doc)
-                    .expect("Couldn't write the library settings to a file");
+                let doc = composer::compose_document(
+                    &built.settings,
+                    &built.credentials_path,
+                    &built.rules_path,
+                );
+                fs::write(&path, doc).expect("Couldn't write the library settings to a file");
             }
             Some(path)
         });
 
     let hosts_settings_path = find_existent_settings::<TlsHostsSettings>(".")
-        .and_then(|fname|
+        .and_then(|fname| {
             ask_for_agreement(&format!("Use the existing TLS hosts settings {}?", fname))
                 .then_some(fname)
-        )
+        })
         .or_else(|| {
             println!("Let's build the TLS hosts settings");
             let settings = tls_hosts_settings::build();
             println!("The TLS hosts settings are successfully built\n");
 
-            let path = get_predefined_params().tls_hosts_settings_file.clone()
-                .unwrap_or_else(|| ask_for_input::<String>(
-                    "Path to a file to store the TLS hosts settings",
-                    Some("hosts.toml".into()),
-                ));
+            let path = get_predefined_params()
+                .tls_hosts_settings_file
+                .clone()
+                .unwrap_or_else(|| {
+                    ask_for_input::<String>(
+                        "Path to a file to store the TLS hosts settings",
+                        Some("hosts.toml".into()),
+                    )
+                });
             if checked_overwrite(&path, "Overwrite the existing TLS hosts settings file?") {
                 fs::write(
                     &path,
                     toml::ser::to_string(&settings)
                         .expect("Couldn't serialize the TLS hosts settings"),
-                ).expect("Couldn't write the TLS hosts settings to a file");
+                )
+                .expect("Couldn't write the TLS hosts settings to a file");
             }
             Some(path)
         });
@@ -177,13 +202,19 @@ Required in non-interactive mode."#),
 
 fn find_existent_settings<T: serde::de::DeserializeOwned>(path: &str) -> Option<String> {
     (get_mode() != Mode::NonInteractive)
-        .then(|| fs::read_dir(path).ok()?
-            .filter_map(Result::ok)
-            .filter(|entry| entry.metadata()
-                .map(|meta| meta.is_file()).unwrap_or_default())
-            .filter_map(|entry| entry.file_name().into_string().ok())
-            .filter_map(|fname| fs::read_to_string(&fname).ok().zip(Some(fname)))
-            .find_map(|(content, fname)| toml::from_str::<T>(&content).map(|_| fname).ok())
-        )
+        .then(|| {
+            fs::read_dir(path)
+                .ok()?
+                .filter_map(Result::ok)
+                .filter(|entry| {
+                    entry
+                        .metadata()
+                        .map(|meta| meta.is_file())
+                        .unwrap_or_default()
+                })
+                .filter_map(|entry| entry.file_name().into_string().ok())
+                .filter_map(|fname| fs::read_to_string(&fname).ok().zip(Some(fname)))
+                .find_map(|(content, fname)| toml::from_str::<T>(&content).map(|_| fname).ok())
+        })
         .flatten()
 }

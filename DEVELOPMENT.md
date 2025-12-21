@@ -4,6 +4,10 @@
 
 ### Prerequisites
 
+This project is compatible with Linux and macOS systems.
+
+Run `make init` to prepare the development environment.
+
 - Rust version 1.85 or higher
     - macOS/Linux: `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- --default-toolchain 1.85 -y`
 - CMake version 3.31.6 or higher
@@ -14,32 +18,29 @@
     - macOS: `xcode-select --install` but you likely already have it if you are using `brew`
     - Linux (Debian/Ubuntu): `apt install build-essential`
 
-This project is compatible with Linux and macOS systems.
+For running linters and tests you need additionally:
+
+- Node.js version 22.12 or higher
+    - macOS: `brew install node`
+    - Linux: (Debian/Ubuntu): `apt install nodejs`
+- Markdownlint
+    - `npm install -g markdownlint-cli`
 
 ### Building
 
-To install TrustTunnel Endpoint, follow these steps:
+Build the binaries using Cargo:
 
-1. Clone the repository:
+```shell
+ cargo build --bins --release
+```
 
-   ```shell
-   git clone https://github.com/TrustTunnel/TrustTunnel.git
-   cd TrustTunnel
-   ```
+or to build binaries for debug:
 
-2. Build the binaries using Cargo:
+```shell
+ cargo build --bins
+```
 
-   ```shell
-   cargo build --bins --release
-   ```
-
-   or to build binaries for debug:
-
-   ```shell
-   cargo build --bins
-   ```
-
-   This command will generate the executables in the `target/release` or `target/debug` directory accordingly.
+This command will generate the executables in the `target/release` or `target/debug` directory accordingly.
 
 ## Usage
 

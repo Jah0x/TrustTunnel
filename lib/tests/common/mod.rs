@@ -1,12 +1,3 @@
-use std::io::{ErrorKind, Write};
-use std::{iter, slice};
-use std::net::{Ipv4Addr, SocketAddr};
-use std::ops::Deref;
-use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicU16, Ordering};
-use std::sync::{Arc, Once};
-use std::time::{Duration, SystemTime};
 use bytes::{Buf, Bytes, BytesMut};
 use futures::future;
 use http::{Request, Response};
@@ -15,15 +6,27 @@ use log::{info, LevelFilter};
 use quiche::h3;
 use quiche::h3::NameValue;
 use ring::rand::{SecureRandom, SystemRandom};
-use rustls::{Certificate, ServerName};
 use rustls::client::ServerCertVerified;
+use rustls::{Certificate, ServerName};
+use std::io::{ErrorKind, Write};
+use std::net::{Ipv4Addr, SocketAddr};
+use std::ops::Deref;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicU16, Ordering};
+use std::sync::{Arc, Once};
+use std::time::{Duration, SystemTime};
+use std::{iter, slice};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio_rustls::TlsConnector;
-use trusttunnel::authentication::{Authenticator, registry_based::RegistryBasedAuthenticator};
+use trusttunnel::authentication::{registry_based::RegistryBasedAuthenticator, Authenticator};
 use trusttunnel::core::Core;
 use trusttunnel::log_utils;
-use trusttunnel::settings::{Http1Settings, Http2Settings, ListenProtocolSettings, QuicSettings, Settings, TlsHostInfo, TlsHostsSettings};
+use trusttunnel::settings::{
+    Http1Settings, Http2Settings, ListenProtocolSettings, QuicSettings, Settings, TlsHostInfo,
+    TlsHostsSettings,
+};
 use trusttunnel::shutdown::Shutdown;
 
 pub const MAIN_DOMAIN_NAME: &str = "localhost";
@@ -39,30 +42,34 @@ pub fn set_up_logger() {
 }
 
 pub fn make_endpoint_address() -> SocketAddr {
-    (ENDPOINT_IP, NEXT_ENDPOINT_PORT.fetch_add(1, Ordering::Relaxed)).into()
+    (
+        ENDPOINT_IP,
+        NEXT_ENDPOINT_PORT.fetch_add(1, Ordering::Relaxed),
+    )
+        .into()
 }
 
 pub fn make_cert_key_file() -> File {
-    let file = File::new(
-        std::env::temp_dir()
-            .join(format!("vle-{}.pem",
+    let file = File::new(std::env::temp_dir().join(format!("vle-{}.pem",
                           trusttunnel::utils::hex_dump(
                               ring::rand::generate::<[u8; 16]>(&SystemRandom::new())
                                   .unwrap().expose().as_slice()
                           )
-            ))
-    );
+            )));
 
-    std::fs::File::create(&file.path).unwrap().write_all(CERT_KEY.as_bytes()).unwrap();
+    std::fs::File::create(&file.path)
+        .unwrap()
+        .write_all(CERT_KEY.as_bytes())
+        .unwrap();
 
     file
 }
 
 pub async fn establish_tls_connection(
-    server_name: &str, peer: &SocketAddr, alpn: Option<&[u8]>,
-)
-    -> impl AsyncRead + AsyncWrite + Unpin
-{
+    server_name: &str,
+    peer: &SocketAddr,
+    alpn: Option<&[u8]>,
+) -> impl AsyncRead + AsyncWrite + Unpin {
     let mut config = rustls::ClientConfig::builder()
         .with_safe_defaults()
         .with_custom_certificate_verifier(Arc::new(NoopVerifier {}))
@@ -76,12 +83,14 @@ pub async fn establish_tls_connection(
             ServerName::try_from(server_name).unwrap(),
             TcpStream::connect(peer).await.unwrap(),
         )
-        .await.unwrap()
+        .await
+        .unwrap()
 }
 
 pub fn make_stream_of_chunks(
-    total_size: usize, chunk_size: Option<usize>,
-) -> futures::stream::Iter<impl Iterator<Item=&'static [u8]>> {
+    total_size: usize,
+    chunk_size: Option<usize>,
+) -> futures::stream::Iter<impl Iterator<Item = &'static [u8]>> {
     const SIZE: usize = 16 * 1024;
 
     let size = chunk_size.unwrap_or(SIZE);
@@ -99,9 +108,7 @@ pub struct File {
 
 impl File {
     fn new(path: PathBuf) -> Self {
-        Self {
-            path,
-        }
+        Self { path }
     }
 }
 
@@ -115,7 +122,13 @@ pub struct NoopVerifier;
 
 impl rustls::client::ServerCertVerifier for NoopVerifier {
     fn verify_server_cert(
-        &self, _: &Certificate, _: &[Certificate], _: &ServerName, _: &mut dyn Iterator<Item=&[u8]>, _: &[u8], _: SystemTime,
+        &self,
+        _: &Certificate,
+        _: &[Certificate],
+        _: &ServerName,
+        _: &mut dyn Iterator<Item = &[u8]>,
+        _: &[u8],
+        _: SystemTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
     }
@@ -181,14 +194,16 @@ tBkmxjMw8cFLCP9o7W7QSb9XIqfCyg4dX4Fl9l1fDNX/xK2c3dlDJv6Spi1IMdFY
 
 pub async fn run_endpoint(listen_address: &SocketAddr) {
     let settings = Settings::builder()
-        .listen_address(listen_address).unwrap()
+        .listen_address(listen_address)
+        .unwrap()
         .listen_protocols(ListenProtocolSettings {
             http1: Some(Http1Settings::builder().build()),
             http2: Some(Http2Settings::builder().build()),
             quic: Some(QuicSettings::builder().build()),
         })
         .allow_private_network_connections(true)
-        .build().unwrap();
+        .build()
+        .unwrap();
 
     let cert_key_file = make_cert_key_file();
     let cert_key_path = cert_key_file.path.to_str().unwrap();
@@ -213,7 +228,8 @@ pub async fn run_endpoint(listen_address: &SocketAddr) {
             cert_chain_path: cert_key_path.to_string(),
             private_key_path: cert_key_path.to_string(),
         }])
-        .build().unwrap();
+        .build()
+        .unwrap();
 
     run_endpoint_with_settings(settings, hosts_settings).await;
 }
@@ -221,7 +237,9 @@ pub async fn run_endpoint(listen_address: &SocketAddr) {
 pub async fn run_endpoint_with_settings(settings: Settings, hosts_settings: TlsHostsSettings) {
     let shutdown = Shutdown::new();
     let authenticator: Option<Arc<dyn Authenticator>> = if !settings.get_clients().is_empty() {
-        Some(Arc::new(RegistryBasedAuthenticator::new(settings.get_clients())))
+        Some(Arc::new(RegistryBasedAuthenticator::new(
+            settings.get_clients(),
+        )))
     } else {
         None
     };
@@ -257,7 +275,12 @@ impl Http3Session {
         config.set_initial_max_stream_data_uni(1_000_000);
         config.set_initial_max_streams_bidi(100);
         config.set_initial_max_streams_uni(100);
-        config.set_application_protos(alpn.as_ref().map_or(h3::APPLICATION_PROTOCOL, slice::from_ref)).unwrap();
+        config
+            .set_application_protos(
+                alpn.as_ref()
+                    .map_or(h3::APPLICATION_PROTOCOL, slice::from_ref),
+            )
+            .unwrap();
 
         let mut quic_conn = quiche::connect(
             Some(server_name),
@@ -265,7 +288,8 @@ impl Http3Session {
             socket.local_addr().unwrap(),
             *peer,
             &mut config,
-        ).unwrap();
+        )
+        .unwrap();
 
         // avoid would block
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -282,7 +306,8 @@ impl Http3Session {
             }
         }
 
-        let h3_conn = h3::Connection::with_transport(&mut quic_conn, &h3::Config::new().unwrap()).unwrap();
+        let h3_conn =
+            h3::Connection::with_transport(&mut quic_conn, &h3::Config::new().unwrap()).unwrap();
         Self::flush_quic_data(&socket, &mut quic_conn);
 
         Self {
@@ -293,14 +318,20 @@ impl Http3Session {
         }
     }
 
-    pub async fn exchange(&mut self, request: Request<hyper::Body>) -> (http::response::Parts, Bytes) {
+    pub async fn exchange(
+        &mut self,
+        request: Request<hyper::Body>,
+    ) -> (http::response::Parts, Bytes) {
         let method = request.method().clone();
         self.send_request(request).await;
         let response = self.recv_response().await;
 
-        let content_length = (method == http::Method::CONNECT).then_some(0)
-            .or_else(|| response.headers.get(http::header::CONTENT_LENGTH)
-                .map(|x| x.to_str().unwrap().parse::<usize>().unwrap()));
+        let content_length = (method == http::Method::CONNECT).then_some(0).or_else(|| {
+            response
+                .headers
+                .get(http::header::CONTENT_LENGTH)
+                .map(|x| x.to_str().unwrap().parse::<usize>().unwrap())
+        });
         let mut content = BytesMut::with_capacity(content_length.unwrap_or_default());
         while content_length.map_or(true, |x| content.len() < x) {
             let mut buffer = [0; 64 * 1024];
@@ -315,37 +346,54 @@ impl Http3Session {
 
     pub async fn send_request(&mut self, mut request: Request<hyper::Body>) {
         let uri = request.uri();
-        let req = iter::once(h3::Header::new(b":method", request.method().as_str().as_bytes()))
-            .chain(match uri.scheme_str() {
-                Some(x) => Box::new(
-                    iter::once(h3::Header::new(b":scheme", x.as_bytes()))
-                ) as Box<dyn Iterator<Item=h3::Header>>,
-                None => Box::new(iter::empty()) as Box<dyn Iterator<Item=h3::Header>>,
-            })
-            .chain(iter::once(h3::Header::new(b":authority", uri.authority().unwrap().as_str().as_bytes())))
-            .chain(match uri.path_and_query() {
-                Some(x) => Box::new(
-                    iter::once(h3::Header::new(b":path", x.as_str().as_bytes()))
-                ) as Box<dyn Iterator<Item=h3::Header>>,
-                None => Box::new(iter::empty()) as Box<dyn Iterator<Item=h3::Header>>,
-            })
-            .chain(request.headers().iter()
-                .map(|(n, v)| h3::Header::new(n.as_str().as_bytes(), v.as_bytes())))
-            .collect::<Vec<_>>();
+        let req = iter::once(h3::Header::new(
+            b":method",
+            request.method().as_str().as_bytes(),
+        ))
+        .chain(match uri.scheme_str() {
+            Some(x) => Box::new(iter::once(h3::Header::new(b":scheme", x.as_bytes())))
+                as Box<dyn Iterator<Item = h3::Header>>,
+            None => Box::new(iter::empty()) as Box<dyn Iterator<Item = h3::Header>>,
+        })
+        .chain(iter::once(h3::Header::new(
+            b":authority",
+            uri.authority().unwrap().as_str().as_bytes(),
+        )))
+        .chain(match uri.path_and_query() {
+            Some(x) => Box::new(iter::once(h3::Header::new(b":path", x.as_str().as_bytes())))
+                as Box<dyn Iterator<Item = h3::Header>>,
+            None => Box::new(iter::empty()) as Box<dyn Iterator<Item = h3::Header>>,
+        })
+        .chain(
+            request
+                .headers()
+                .iter()
+                .map(|(n, v)| h3::Header::new(n.as_str().as_bytes(), v.as_bytes())),
+        )
+        .collect::<Vec<_>>();
 
-        self.stream_id = Some(self.h3_conn.send_request(&mut self.quic_conn, &req, false).unwrap());
+        self.stream_id = Some(
+            self.h3_conn
+                .send_request(&mut self.quic_conn, &req, false)
+                .unwrap(),
+        );
         Self::flush_quic_data(&self.socket, &mut self.quic_conn);
 
         while let Some(mut chunk) = request.body_mut().data().await.map(Result::unwrap) {
             while !chunk.is_empty() {
                 let stream_id = self.stream_id();
-                match self.h3_conn.send_body(&mut self.quic_conn, stream_id, &chunk, false) {
+                match self
+                    .h3_conn
+                    .send_body(&mut self.quic_conn, stream_id, &chunk, false)
+                {
                     Ok(n) => chunk.advance(n),
                     Err(h3::Error::Done) => {
                         Self::flush_quic_data(&self.socket, &mut self.quic_conn);
                         let _ = tokio::time::timeout(
-                            self.quic_conn.timeout().unwrap(), self.socket.readable(),
-                        ).await;
+                            self.quic_conn.timeout().unwrap(),
+                            self.socket.readable(),
+                        )
+                        .await;
                     }
                     Err(e) => panic!("{}", e),
                 }
@@ -364,8 +412,7 @@ impl Http3Session {
 
         match self.poll().await {
             h3::Event::Headers { list, .. } => {
-                let mut response = Response::builder()
-                    .version(http::Version::HTTP_3);
+                let mut response = Response::builder().version(http::Version::HTTP_3);
                 for h in list {
                     match h.name() {
                         b":status" => response = response.status(h.value()),
@@ -399,17 +446,29 @@ impl Http3Session {
         }
     }
 
-    pub async fn send(&mut self, mut stream: impl futures::stream::Stream<Item=impl Deref<Target=[u8]>> + Unpin) {
-        while let Some(mut chunk) = futures::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx)).await.as_deref() {
+    pub async fn send(
+        &mut self,
+        mut stream: impl futures::stream::Stream<Item = impl Deref<Target = [u8]>> + Unpin,
+    ) {
+        while let Some(mut chunk) =
+            futures::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx))
+                .await
+                .as_deref()
+        {
             while !chunk.is_empty() {
                 let stream_id = self.stream_id();
-                match self.h3_conn.send_body(&mut self.quic_conn, stream_id, chunk, false) {
+                match self
+                    .h3_conn
+                    .send_body(&mut self.quic_conn, stream_id, chunk, false)
+                {
                     Ok(n) => chunk = &chunk[n..],
                     Err(h3::Error::Done) => {
                         Self::flush_quic_data(&self.socket, &mut self.quic_conn);
                         let _ = tokio::time::timeout(
-                            self.quic_conn.timeout().unwrap(), self.socket.readable(),
-                        ).await;
+                            self.quic_conn.timeout().unwrap(),
+                            self.socket.readable(),
+                        )
+                        .await;
                     }
                     Err(e) => panic!("{}", e),
                 }
@@ -435,7 +494,8 @@ impl Http3Session {
 
             Self::flush_quic_data(&self.socket, &mut self.quic_conn);
 
-            let _ = tokio::time::timeout(self.quic_conn.timeout().unwrap(), self.socket.readable()).await;
+            let _ = tokio::time::timeout(self.quic_conn.timeout().unwrap(), self.socket.readable())
+                .await;
 
             Self::read_out_socket(&self.socket, &mut self.quic_conn);
 
@@ -455,12 +515,11 @@ impl Http3Session {
         let mut buffer = [0; MAX_QUIC_UDP_PAYLOAD_SIZE];
         loop {
             match quic_conn.send(&mut buffer) {
-                Ok((n, send_info)) =>
-                    match socket.try_send_to(&buffer[..n], send_info.to) {
-                        Ok(_) => (),
-                        Err(e) if e.kind() == ErrorKind::WouldBlock => break,
-                        Err(e) => panic!("{}", e),
-                    }
+                Ok((n, send_info)) => match socket.try_send_to(&buffer[..n], send_info.to) {
+                    Ok(_) => (),
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => break,
+                    Err(e) => panic!("{}", e),
+                },
                 Err(quiche::Error::Done) => break,
                 Err(e) => panic!("{}", e),
             }
@@ -481,7 +540,8 @@ impl Http3Session {
             }
 
             Self::flush_quic_data(&self.socket, &mut self.quic_conn);
-            let _ = tokio::time::timeout(self.quic_conn.timeout().unwrap(), self.socket.readable()).await;
+            let _ = tokio::time::timeout(self.quic_conn.timeout().unwrap(), self.socket.readable())
+                .await;
             Self::read_out_socket(&self.socket, &mut self.quic_conn);
 
             if self.quic_conn.is_closed() {
@@ -500,18 +560,21 @@ impl Http3Session {
 }
 
 pub async fn do_get_request<IO>(
-    io: IO, version: http::Version, url: &str, extra_headers: &[(&str, &str)],
-)
-    -> (http::response::Parts, Bytes)
-    where IO: AsyncRead + AsyncWrite + Unpin + Send + 'static
+    io: IO,
+    version: http::Version,
+    url: &str,
+    extra_headers: &[(&str, &str)],
+) -> (http::response::Parts, Bytes)
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut request, conn) = hyper::client::conn::Builder::new()
         .http2_only(version == http::Version::HTTP_2)
         .handshake(io)
-        .await.unwrap();
+        .await
+        .unwrap();
 
-    let mut request_builder = hyper::Request::get(url)
-        .version(version);
+    let mut request_builder = hyper::Request::get(url).version(version);
     for (n, v) in extra_headers {
         request_builder = request_builder.header(*n, *v);
     }
@@ -519,7 +582,8 @@ pub async fn do_get_request<IO>(
     let exchange = async {
         let response = request
             .send_request(request_builder.body(hyper::Body::empty()).unwrap())
-            .await.unwrap();
+            .await
+            .unwrap();
         info!("Received response: {:?}", response);
 
         let (parts, body) = response.into_parts();
@@ -537,15 +601,19 @@ pub async fn do_get_request<IO>(
 }
 
 pub async fn do_post_request<IO>(
-    io: IO, version: http::Version, url: &str, content_length: usize,
-)
-    -> Response<hyper::Body>
-    where IO: AsyncRead + AsyncWrite + Unpin + Send + 'static
+    io: IO,
+    version: http::Version,
+    url: &str,
+    content_length: usize,
+) -> Response<hyper::Body>
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut request, conn) = hyper::client::conn::Builder::new()
         .http2_only(version == http::Version::HTTP_2)
         .handshake(io)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     let exchange = async {
         let req = hyper::Request::post(url)

@@ -49,10 +49,19 @@ fn mixed() {
         Baz,
     }
 
-    assert_eq!(Foo::doc(), r#"- How much watch?
-- Six watch"#);
-    assert_eq!(Foo::doc_bar(), r#"- Such much?
-- For whom how"#);
-    assert_eq!(Foo::doc_baz(), r#"- MGIMO finished?
-- Ask"#);
+    assert_eq!(
+        Foo::doc(),
+        r#"- How much watch?
+- Six watch"#
+    );
+    assert_eq!(
+        Foo::doc_bar(),
+        r#"- Such much?
+- For whom how"#
+    );
+    assert_eq!(
+        Foo::doc_baz(),
+        r#"- MGIMO finished?
+- Ask"#
+    );
 }

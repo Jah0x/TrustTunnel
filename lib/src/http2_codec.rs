@@ -1,19 +1,18 @@
+use crate::http_codec::{HttpCodec, RequestHeaders, ResponseHeaders};
+use crate::settings::Settings;
+use crate::tls_demultiplexer::Protocol;
+use crate::{datagram_pipe, http_codec, log_id, log_utils, net_utils, pipe};
+use async_trait::async_trait;
+use bytes::Bytes;
+use h2::server::{Connection, Handshake, SendResponse};
+use h2::{server, Reason, RecvStream, SendStream};
 use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use async_trait::async_trait;
-use bytes::Bytes;
-use h2::{Reason, RecvStream, SendStream, server};
-use h2::server::{Connection, Handshake, SendResponse};
 use tokio::io::{AsyncRead, AsyncWrite};
-use crate::http_codec::{HttpCodec, RequestHeaders, ResponseHeaders};
-use crate::{datagram_pipe, http_codec, log_id, log_utils, net_utils, pipe};
-use crate::tls_demultiplexer::Protocol;
-use crate::settings::Settings;
-
 
 pub(crate) struct Http2Codec<IO> {
     state: State<IO>,
@@ -26,7 +25,6 @@ enum State<IO> {
     Handshake(Handshake<IO>),
     Established(Connection<IO, Bytes>),
 }
-
 
 struct Stream {
     request: Request,
@@ -55,9 +53,9 @@ struct RespondStream {
     id: log_utils::IdChain<u64>,
 }
 
-
 impl<IO> Http2Codec<IO>
-    where IO: AsyncRead + AsyncWrite + Unpin + net_utils::PeerAddr
+where
+    IO: AsyncRead + AsyncWrite + Unpin + net_utils::PeerAddr,
 {
     pub fn new(
         core_settings: Arc<Settings>,
@@ -76,7 +74,7 @@ impl<IO> Http2Codec<IO>
                     .max_concurrent_streams(http2_settings.max_concurrent_streams)
                     .max_frame_size(http2_settings.max_frame_size)
                     .max_header_list_size(http2_settings.header_table_size)
-                    .handshake(transport_stream)
+                    .handshake(transport_stream),
             ),
             parent_id_chain,
             next_conn_id: 0..,
@@ -102,7 +100,8 @@ impl<IO: AsyncRead + AsyncWrite + Send + Unpin> HttpCodec for Http2Codec<IO> {
             Some(Ok((request, respond))) => {
                 let (request, rx) = request.into_parts();
                 let id = self.parent_id_chain.extended(log_utils::IdItem::new(
-                    log_utils::CONNECTION_ID_FMT, self.next_conn_id.next().unwrap(),
+                    log_utils::CONNECTION_ID_FMT,
+                    self.next_conn_id.next().unwrap(),
                 ));
                 // @note: [`h2::StreamId`] cannot be converted to raw integer, so just log it
                 //        to have a link between stream and out own generated IDs in the logs
@@ -115,10 +114,7 @@ impl<IO: AsyncRead + AsyncWrite + Send + Unpin> HttpCodec for Http2Codec<IO> {
                         client_address: self.client_address,
                         id: id.clone(),
                     },
-                    respond: Respond {
-                        tx: respond,
-                        id,
-                    },
+                    respond: Respond { tx: respond, id },
                 })))
             }
             Some(Err(e)) if e.is_io() => Err(e.into_io().unwrap()),
@@ -159,7 +155,12 @@ impl http_codec::Stream for Stream {
         &self.request
     }
 
-    fn split(self: Box<Self>) -> (Box<dyn http_codec::PendingRequest>, Box<dyn http_codec::PendingRespond>) {
+    fn split(
+        self: Box<Self>,
+    ) -> (
+        Box<dyn http_codec::PendingRequest>,
+        Box<dyn http_codec::PendingRespond>,
+    ) {
         (Box::new(self.request), Box::new(self.respond))
     }
 }
@@ -195,14 +196,18 @@ impl pipe::Source for RequestStream {
         match self.rx.data().await {
             None => Ok(pipe::Data::Eof),
             Some(Ok(chunk)) => Ok(pipe::Data::Chunk(chunk)),
-            Some(Err(e)) if e.reason().map_or(true, |r| r == Reason::NO_ERROR) =>
-                Ok(pipe::Data::Eof),
+            Some(Err(e)) if e.reason().map_or(true, |r| r == Reason::NO_ERROR) => {
+                Ok(pipe::Data::Eof)
+            }
             Some(Err(e)) => Err(h2_to_io_error(e)),
         }
     }
 
     fn consume(&mut self, size: usize) -> io::Result<()> {
-        self.rx.flow_control().release_capacity(size).map_err(h2_to_io_error)
+        self.rx
+            .flow_control()
+            .release_capacity(size)
+            .map_err(h2_to_io_error)
     }
 }
 
@@ -211,18 +216,25 @@ impl http_codec::PendingRespond for Respond {
         self.id.clone()
     }
 
-    fn send_response(mut self: Box<Self>, response: ResponseHeaders, eof: bool)
-                     -> io::Result<Box<dyn http_codec::RespondedStreamSink>>
-    {
-        log_id!(debug, self.id, "Sending response: {:?} (eof={})", response, eof);
+    fn send_response(
+        mut self: Box<Self>,
+        response: ResponseHeaders,
+        eof: bool,
+    ) -> io::Result<Box<dyn http_codec::RespondedStreamSink>> {
+        log_id!(
+            debug,
+            self.id,
+            "Sending response: {:?} (eof={})",
+            response,
+            eof
+        );
 
-        let tx = self.tx.send_response(http::Response::from_parts(response, ()), eof)
+        let tx = self
+            .tx
+            .send_response(http::Response::from_parts(response, ()), eof)
             .map_err(h2_to_io_error)?;
 
-        Ok(Box::new(RespondStream {
-            tx,
-            id: self.id,
-        }))
+        Ok(Box::new(RespondStream { tx, id: self.id }))
     }
 }
 
@@ -248,13 +260,11 @@ impl<'a> std::future::Future for WaitWritable<'a> {
             return Poll::Ready(Ok(()));
         }
 
-        Poll::Ready(
-            match futures::ready!(self.stream.poll_capacity(cx)) {
-                None => Err(io::Error::from(ErrorKind::UnexpectedEof)),
-                Some(Ok(_)) => Ok(()),
-                Some(Err(e)) => Err(h2_to_io_error(e)),
-            }
-        )
+        Poll::Ready(match futures::ready!(self.stream.poll_capacity(cx)) {
+            None => Err(io::Error::from(ErrorKind::UnexpectedEof)),
+            Some(Ok(_)) => Ok(()),
+            Some(Err(e)) => Err(h2_to_io_error(e)),
+        })
     }
 }
 
@@ -266,16 +276,23 @@ impl pipe::Sink for RespondStream {
 
     fn write(&mut self, mut data: Bytes) -> io::Result<Bytes> {
         self.tx.reserve_capacity(data.len());
-        self.tx.send_data(data.split_to(self.tx.capacity()), false).map_err(h2_to_io_error)?;
+        self.tx
+            .send_data(data.split_to(self.tx.capacity()), false)
+            .map_err(h2_to_io_error)?;
         Ok(data)
     }
 
     fn eof(&mut self) -> io::Result<()> {
-        self.tx.send_data(Bytes::new(), true).map_err(h2_to_io_error)
+        self.tx
+            .send_data(Bytes::new(), true)
+            .map_err(h2_to_io_error)
     }
 
     async fn wait_writable(&mut self) -> io::Result<()> {
-        WaitWritable { stream: &mut self.tx }.await
+        WaitWritable {
+            stream: &mut self.tx,
+        }
+        .await
     }
 }
 
@@ -284,7 +301,8 @@ impl http_codec::DroppingSink for RespondStream {
         self.tx.reserve_capacity(data.len());
 
         if self.tx.capacity() >= data.len() {
-            self.tx.send_data(data, false)
+            self.tx
+                .send_data(data, false)
                 .map(|_| datagram_pipe::SendStatus::Sent)
                 .map_err(h2_to_io_error)
         } else {

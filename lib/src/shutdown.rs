@@ -2,7 +2,6 @@ use std::fmt::{Display, Formatter};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
 
-
 /// This entity is intended to provide a possibility to gracefully shutdown
 /// an async operation.
 /// The usage is like the following:
@@ -51,11 +50,7 @@ pub(crate) enum NotificationError {
 }
 
 /// Protects [`Shutdown::completion`] from early return
-pub(crate) struct CompletionGuard(
-    #[allow(dead_code)]
-    mpsc::Sender<()>
-);
-
+pub(crate) struct CompletionGuard(#[allow(dead_code)] mpsc::Sender<()>);
 
 impl Shutdown {
     pub fn new() -> Arc<Mutex<Self>> {
@@ -88,7 +83,10 @@ impl Shutdown {
     /// is dropped.
     /// May return [`None`] in case shutdown has already been committed.
     pub(crate) fn completion_guard(&self) -> Option<CompletionGuard> {
-        self.shutdown_complete_tx.as_ref().cloned().map(CompletionGuard)
+        self.shutdown_complete_tx
+            .as_ref()
+            .cloned()
+            .map(CompletionGuard)
     }
 
     /// Get a notification handler which is used to initiate graceful shutdowns
@@ -121,11 +119,10 @@ impl Display for NotificationError {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
     use crate::shutdown::Shutdown;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test() {
@@ -146,7 +143,8 @@ mod tests {
             tokio::time::timeout(
                 Duration::from_secs(5),
                 shutdown.lock().unwrap().completion()
-            ).await
+            )
+            .await
         );
     }
 }

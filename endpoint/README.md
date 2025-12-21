@@ -30,6 +30,7 @@ A standalone application that allows any user to easily set up their own VPN ser
   through command line arguments. Users can customize the behavior of the endpoint according to
   their specific requirements. To view the available options, run the following command in the
   Terminal:
+
    ```shell
    trusttunnel_endpoint -h
    ```

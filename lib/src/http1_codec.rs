@@ -1,22 +1,20 @@
+use crate::http_codec::{RequestHeaders, ResponseHeaders};
+use crate::pipe::Sink;
+use crate::settings::Settings;
+use crate::tls_demultiplexer::Protocol;
+use crate::{datagram_pipe, http_codec, log_id, log_utils, net_utils, pipe, utils};
+use async_trait::async_trait;
+use bytes::{BufMut, Bytes, BytesMut};
 use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::str::FromStr;
 use std::sync::Arc;
-use async_trait::async_trait;
-use bytes::{BufMut, Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{mpsc, Notify};
-use crate::{datagram_pipe, http_codec, log_id, log_utils, net_utils, pipe, utils};
-use crate::tls_demultiplexer::Protocol;
-use crate::http_codec::{RequestHeaders, ResponseHeaders};
-use crate::pipe::Sink;
-use crate::settings::Settings;
-
 
 pub(crate) const MAX_RAW_HEADERS_SIZE: usize = 1024;
 pub(crate) const MAX_HEADERS_NUM: usize = 32;
-
 
 pub(crate) struct Http1Codec<IO> {
     state: State,
@@ -82,9 +80,9 @@ enum RequestStatus {
     NeedRespond(ResponseHeaders),
 }
 
-
 impl<IO> Http1Codec<IO>
-    where IO: net_utils::PeerAddr
+where
+    IO: net_utils::PeerAddr,
 {
     pub fn new(
         core_settings: Arc<Settings>,
@@ -104,7 +102,11 @@ impl<IO> Http1Codec<IO>
             download_eof: Arc::new(Notify::new()),
             upload_rx: Some(upload_rx),
             upload_tx,
-            upload_buffer_size: core_settings.listen_protocols.http1.as_ref().unwrap()
+            upload_buffer_size: core_settings
+                .listen_protocols
+                .http1
+                .as_ref()
+                .unwrap()
                 .upload_buffer_size,
             parent_id_chain,
             next_request_id: 0..,
@@ -121,26 +123,36 @@ impl<IO> Http1Codec<IO>
                 Ok(RequestStatus::Partial)
             }
             DecodeStatus::Complete(request, tail) => {
-                if request.method == http::Method::CONNECT && request.headers.contains_key("expect") {
-                    return Ok(RequestStatus::NeedRespond(http::response::Builder::new()
-                        .version(request.version)
-                        .status(http::StatusCode::EXPECTATION_FAILED)
-                        .header("Connection", "close")
-                        .body(())
-                        .map_err(|e| io::Error::new(
-                            ErrorKind::Other,
-                            format!("Failed to build \"Expectation Failed\" response: {}", e)
-                        ))?
-                        .into_parts().0
+                if request.method == http::Method::CONNECT && request.headers.contains_key("expect")
+                {
+                    return Ok(RequestStatus::NeedRespond(
+                        http::response::Builder::new()
+                            .version(request.version)
+                            .status(http::StatusCode::EXPECTATION_FAILED)
+                            .header("Connection", "close")
+                            .body(())
+                            .map_err(|e| {
+                                io::Error::new(
+                                    ErrorKind::Other,
+                                    format!(
+                                        "Failed to build \"Expectation Failed\" response: {}",
+                                        e
+                                    ),
+                                )
+                            })?
+                            .into_parts()
+                            .0,
                     ));
                 }
 
-                let _ = std::mem::replace(&mut self.state, State::RequestInProgress(RequestInProgress {
-                    buffer: tail,
-                }));
+                let _ = std::mem::replace(
+                    &mut self.state,
+                    State::RequestInProgress(RequestInProgress { buffer: tail }),
+                );
 
                 let id = self.parent_id_chain.extended(log_utils::IdItem::new(
-                    log_utils::CONNECTION_ID_FMT, self.next_request_id.next().unwrap()
+                    log_utils::CONNECTION_ID_FMT,
+                    self.next_request_id.next().unwrap(),
                 ));
                 let insert_connection_close = request.method == http::Method::CONNECT;
                 Ok(RequestStatus::Complete(Box::new(Stream {
@@ -155,7 +167,7 @@ impl<IO> Http1Codec<IO>
                         download_eof: self.download_eof.clone(),
                         insert_connection_close,
                         id,
-                    }
+                    },
                 })))
             }
         }
@@ -164,7 +176,8 @@ impl<IO> Http1Codec<IO>
 
 #[async_trait]
 impl<IO> http_codec::HttpCodec for Http1Codec<IO>
-    where IO: AsyncRead + AsyncWrite + Send + Unpin + net_utils::PeerAddr
+where
+    IO: AsyncRead + AsyncWrite + Send + Unpin + net_utils::PeerAddr,
 {
     async fn listen(&mut self) -> io::Result<Option<Box<dyn http_codec::Stream>>> {
         loop {
@@ -253,7 +266,12 @@ impl http_codec::Stream for Stream {
         &self.source
     }
 
-    fn split(self: Box<Self>) -> (Box<dyn http_codec::PendingRequest>, Box<dyn http_codec::PendingRespond>) {
+    fn split(
+        self: Box<Self>,
+    ) -> (
+        Box<dyn http_codec::PendingRequest>,
+        Box<dyn http_codec::PendingRespond>,
+    ) {
         (Box::new(self.source), Box::new(self.sink))
     }
 }
@@ -282,30 +300,53 @@ impl http_codec::PendingRespond for StreamSink {
     }
 
     fn send_intermediate_response(&self, response: ResponseHeaders) -> io::Result<()> {
-        log_id!(debug, self.id, "Sending intermediate response: {:?}", response);
+        log_id!(
+            debug,
+            self.id,
+            "Sending intermediate response: {:?}",
+            response
+        );
 
-        self.download_tx.as_ref()
+        self.download_tx
+            .as_ref()
             .ok_or_else(|| io::Error::from(ErrorKind::UnexpectedEof))?
             .try_send(encode_response(response))
-            .map_err(|e| io::Error::new(
-                ErrorKind::Other, format!("Failed to put response in queue: {}", e),
-            ))
+            .map_err(|e| {
+                io::Error::new(
+                    ErrorKind::Other,
+                    format!("Failed to put response in queue: {}", e),
+                )
+            })
     }
 
-    fn send_response(mut self: Box<Self>, mut response: ResponseHeaders, eof: bool)
-        -> io::Result<Box<dyn http_codec::RespondedStreamSink>>
-    {
+    fn send_response(
+        mut self: Box<Self>,
+        mut response: ResponseHeaders,
+        eof: bool,
+    ) -> io::Result<Box<dyn http_codec::RespondedStreamSink>> {
         if self.insert_connection_close && !response.headers.contains_key("Connection") {
-            response.headers.insert("Connection", http::HeaderValue::from_static("close"));
+            response
+                .headers
+                .insert("Connection", http::HeaderValue::from_static("close"));
         }
-        log_id!(debug, self.id, "Sending response: {:?} (eof={})", response, eof);
+        log_id!(
+            debug,
+            self.id,
+            "Sending response: {:?} (eof={})",
+            response,
+            eof
+        );
 
-        self.download_tx.as_ref()
+        self.download_tx
+            .as_ref()
             .ok_or_else(|| io::Error::from(ErrorKind::UnexpectedEof))?
             .try_send(encode_response(response))
-            .map_err(|e| io::Error::new(
-                ErrorKind::Other, format!("Failed to put response in queue: {}", e),
-            ))?;
+            .map_err(|e| {
+                io::Error::new(
+                    ErrorKind::Other,
+                    format!("Failed to put response in queue: {}", e),
+                )
+            })?;
 
         if eof {
             self.eof()?;
@@ -360,13 +401,17 @@ impl Sink for StreamSink {
     }
 
     fn write(&mut self, data: Bytes) -> io::Result<Bytes> {
-        match self.download_tx.as_ref()
+        match self
+            .download_tx
+            .as_ref()
             .ok_or_else(|| io::Error::from(ErrorKind::UnexpectedEof))?
             .try_send(data)
         {
             Ok(_) => Ok(Bytes::new()),
             Err(mpsc::error::TrySendError::Full(unsent)) => Ok(unsent),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(io::Error::from(ErrorKind::UnexpectedEof)),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(io::Error::from(ErrorKind::UnexpectedEof))
+            }
         }
     }
 
@@ -376,9 +421,12 @@ impl Sink for StreamSink {
     }
 
     async fn wait_writable(&mut self) -> io::Result<()> {
-        match self.download_tx.as_ref()
+        match self
+            .download_tx
+            .as_ref()
             .ok_or_else(|| io::Error::from(ErrorKind::UnexpectedEof))?
-            .reserve().await
+            .reserve()
+            .await
         {
             Ok(_) => Ok(()),
             Err(_) => Err(io::Error::from(ErrorKind::UnexpectedEof)),
@@ -388,13 +436,17 @@ impl Sink for StreamSink {
 
 impl http_codec::DroppingSink for StreamSink {
     fn write(&mut self, data: Bytes) -> io::Result<datagram_pipe::SendStatus> {
-        match self.download_tx.as_ref()
+        match self
+            .download_tx
+            .as_ref()
             .ok_or_else(|| io::Error::from(ErrorKind::UnexpectedEof))?
             .try_send(data)
         {
             Ok(_) => Ok(datagram_pipe::SendStatus::Sent),
             Err(mpsc::error::TrySendError::Full(_)) => Ok(datagram_pipe::SendStatus::Dropped),
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(io::Error::from(ErrorKind::UnexpectedEof)),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                Err(io::Error::from(ErrorKind::UnexpectedEof))
+            }
         }
     }
 }
@@ -433,10 +485,12 @@ pub(crate) fn encode_request(request: &RequestHeaders) -> Bytes {
     encoded.put(request.method.as_str().as_bytes());
     encoded.put([b' '].as_slice());
     encoded.put(
-        request.uri.path_and_query()
+        request
+            .uri
+            .path_and_query()
             .map(http::uri::PathAndQuery::as_str)
             .unwrap_or("/")
-            .as_bytes()
+            .as_bytes(),
     );
     encoded.put(" HTTP/1.".as_bytes());
     encoded.put([('0' as u32 + version_minor_digit(request.version)) as u8].as_slice());
@@ -461,7 +515,13 @@ pub(crate) fn encode_response(response: ResponseHeaders) -> Bytes {
     encoded.put([b' '].as_slice());
     encoded.put(response.status.as_str().as_bytes());
     encoded.put([b' '].as_slice());
-    encoded.put(response.status.canonical_reason().unwrap_or_default().as_bytes());
+    encoded.put(
+        response
+            .status
+            .canonical_reason()
+            .unwrap_or_default()
+            .as_bytes(),
+    );
     encoded.put("\r\n".as_bytes());
 
     encoded = encode_headers(encoded, &response.headers);
@@ -479,42 +539,53 @@ pub(crate) fn decode_request(
     match request.parse(&buffer) {
         Ok(httparse::Status::Complete(idx)) => {
             let mut request_builder = http::request::Request::builder()
-                .version(httparse_to_http_version(
-                    request.version
-                        .ok_or_else(|| io::Error::new(ErrorKind::Other, "Version not found"))?
-                ))
+                .version(httparse_to_http_version(request.version.ok_or_else(
+                    || io::Error::new(ErrorKind::Other, "Version not found"),
+                )?))
                 .method(
-                    request.method
-                        .ok_or_else(|| io::Error::new(ErrorKind::Other, "Method not found"))?
+                    request
+                        .method
+                        .ok_or_else(|| io::Error::new(ErrorKind::Other, "Method not found"))?,
                 );
 
             let mut uri = match request.path {
-                None => return Err(io::Error::new(
-                    ErrorKind::Other, format!("Invalid path: {:?}", request.path)
-                )),
+                None => {
+                    return Err(io::Error::new(
+                        ErrorKind::Other,
+                        format!("Invalid path: {:?}", request.path),
+                    ))
+                }
                 Some(p) => match http::uri::Uri::from_str(p) {
                     Ok(uri) => uri,
-                    Err(e) => return Err(io::Error::new(
-                        ErrorKind::Other,
-                        format!("Invalid path: path={:?}, error={}", request.path, e)
-                    )),
-                }
+                    Err(e) => {
+                        return Err(io::Error::new(
+                            ErrorKind::Other,
+                            format!("Invalid path: path={:?}, error={}", request.path, e),
+                        ))
+                    }
+                },
             };
 
             for h in request.headers {
                 match h.name.to_lowercase().as_str() {
-                    "host" if uri.authority().is_none() =>
+                    "host" if uri.authority().is_none() => {
                         uri = http::uri::Uri::builder()
                             .scheme("https")
                             .authority(h.value)
                             .path_and_query(request.path.unwrap())
                             .build()
-                            .map_err(|e| io::Error::new(
-                                ErrorKind::Other,
-                                format!("Unexpected URI: error={}, authority={}, path={:?}",
-                                        e, utils::hex_dump(h.value), request.path,
+                            .map_err(|e| {
+                                io::Error::new(
+                                    ErrorKind::Other,
+                                    format!(
+                                        "Unexpected URI: error={}, authority={}, path={:?}",
+                                        e,
+                                        utils::hex_dump(h.value),
+                                        request.path,
+                                    ),
                                 )
-                            ))?,
+                            })?
+                    }
                     _ => request_builder = request_builder.header(h.name, h.value),
                 }
             }
@@ -522,17 +593,22 @@ pub(crate) fn decode_request(
             request_builder = request_builder.uri(uri);
 
             Ok(DecodeStatus::Complete(
-                request_builder.body(())
-                    .map_err(|e| io::Error::new(ErrorKind::Other, format!("Invalid request: {}", e)))?
-                    .into_parts().0,
+                request_builder
+                    .body(())
+                    .map_err(|e| {
+                        io::Error::new(ErrorKind::Other, format!("Invalid request: {}", e))
+                    })?
+                    .into_parts()
+                    .0,
                 buffer.split_off(idx),
             ))
         }
         Ok(httparse::Status::Partial) if buffer.len() < raw_buffer_cap => {
             Ok(DecodeStatus::Partial(buffer))
-        },
+        }
         Ok(httparse::Status::Partial) => Err(io::Error::new(
-            ErrorKind::Other, "Too long HTTP request headers"
+            ErrorKind::Other,
+            "Too long HTTP request headers",
         )),
         Err(e) => Err(io::Error::new(ErrorKind::Other, e.to_string())),
     }
@@ -548,13 +624,13 @@ pub(crate) fn decode_response(
     match response.parse(&buffer) {
         Ok(httparse::Status::Complete(idx)) => {
             let mut response_builder = http::response::Response::builder()
-                .version(httparse_to_http_version(
-                    response.version
-                        .ok_or_else(|| io::Error::new(ErrorKind::Other, "Version not found"))?
-                ))
+                .version(httparse_to_http_version(response.version.ok_or_else(
+                    || io::Error::new(ErrorKind::Other, "Version not found"),
+                )?))
                 .status(
-                    response.code
-                        .ok_or_else(|| io::Error::new(ErrorKind::Other, "Status not found"))?
+                    response
+                        .code
+                        .ok_or_else(|| io::Error::new(ErrorKind::Other, "Status not found"))?,
                 );
 
             for h in response.headers {
@@ -562,17 +638,22 @@ pub(crate) fn decode_response(
             }
 
             Ok(DecodeStatus::Complete(
-                response_builder.body(())
-                    .map_err(|e| io::Error::new(ErrorKind::Other, format!("Invalid response: {}", e)))?
-                    .into_parts().0,
+                response_builder
+                    .body(())
+                    .map_err(|e| {
+                        io::Error::new(ErrorKind::Other, format!("Invalid response: {}", e))
+                    })?
+                    .into_parts()
+                    .0,
                 buffer.split_off(idx),
             ))
         }
         Ok(httparse::Status::Partial) if buffer.len() < raw_buffer_cap => {
             Ok(DecodeStatus::Partial(buffer))
-        },
+        }
         Ok(httparse::Status::Partial) => Err(io::Error::new(
-            ErrorKind::Other, "Too long HTTP response headers"
+            ErrorKind::Other,
+            "Too long HTTP response headers",
         )),
         Err(e) => Err(io::Error::new(ErrorKind::Other, e.to_string())),
     }

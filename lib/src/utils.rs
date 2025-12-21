@@ -1,24 +1,21 @@
+use rustls::{Certificate, PrivateKey};
+use rustls_pemfile::{certs, pkcs8_private_keys};
 use std::fs::File;
 use std::io;
 use std::io::{BufReader, ErrorKind};
-use rustls::{Certificate, PrivateKey};
-use rustls_pemfile::{certs, pkcs8_private_keys};
-
 
 pub fn hex_dump(buf: &[u8]) -> String {
     buf.iter()
-        .fold(
-            String::with_capacity(2 * buf.len()),
-            |str, b| str + format!("{:02x}", b).as_str()
-        )
+        .fold(String::with_capacity(2 * buf.len()), |str, b| {
+            str + format!("{:02x}", b).as_str()
+        })
 }
 
 pub fn hex_dump_uppercase(buf: &[u8]) -> String {
     buf.iter()
-        .fold(
-            String::with_capacity(2 * buf.len()),
-            |str, b| str + format!("{:02X}", b).as_str()
-        )
+        .fold(String::with_capacity(2 * buf.len()), |str, b| {
+            str + format!("{:02X}", b).as_str()
+        })
 }
 
 /// Can hold either of the options
@@ -39,7 +36,8 @@ impl<L, R> Either<L, R> {
     /// Apply the function to the object in case it contains the [`Self::Left`] option.
     /// Otherwise, do nothing.
     pub fn map_left<F, T>(self, f: F) -> Either<T, R>
-        where F: FnOnce(L) -> T,
+    where
+        F: FnOnce(L) -> T,
     {
         match self {
             Self::Left(x) => Either::<T, R>::Left(f(x)),
@@ -50,7 +48,8 @@ impl<L, R> Either<L, R> {
     /// Apply the function to the object in case it contains the [`Self::Right`] option.
     /// Otherwise, do nothing.
     pub fn map_right<F, T>(self, f: F) -> Either<L, T>
-        where F: FnOnce(R) -> T,
+    where
+        F: FnOnce(R) -> T,
     {
         match self {
             Self::Left(x) => Either::<L, T>::Left(x),
@@ -73,17 +72,18 @@ impl<L, R> Either<L, R> {
 
 pub fn load_certs(filename: &str) -> io::Result<Vec<Certificate>> {
     certs(&mut BufReader::new(File::open(filename)?))
-        .map_err(|e| io::Error::new(
-            ErrorKind::InvalidInput, format!("Invalid cert: {}", e)))
+        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("Invalid cert: {}", e)))
         .map(|mut certs| certs.drain(..).map(Certificate).collect())
 }
 
 pub fn load_private_key(filename: &str) -> io::Result<PrivateKey> {
     pkcs8_private_keys(&mut BufReader::new(File::open(filename)?))
-        .map_err(|e| io::Error::new(
-            ErrorKind::InvalidInput, format!("Invalid key: {}", e)))
-        .and_then(|keys| keys.first().cloned()
-            .ok_or_else(|| io::Error::new(ErrorKind::Other, "No keys found")))
+        .map_err(|e| io::Error::new(ErrorKind::InvalidInput, format!("Invalid key: {}", e)))
+        .and_then(|keys| {
+            keys.first()
+                .cloned()
+                .ok_or_else(|| io::Error::new(ErrorKind::Other, "No keys found"))
+        })
         .map(PrivateKey)
 }
 
@@ -95,15 +95,14 @@ pub trait IterJoin {
 }
 
 impl<I, T> IterJoin for I
-    where
-        I: Iterator<Item=T>,
-        T: AsRef<str>,
+where
+    I: Iterator<Item = T>,
+    T: AsRef<str>,
 {
     type Output = String;
 
     fn join(self, sep: impl AsRef<str>) -> Self::Output {
-        let mut ret = self
-            .fold(String::new(), |acc, x| acc + x.as_ref() + sep.as_ref());
+        let mut ret = self.fold(String::new(), |acc, x| acc + x.as_ref() + sep.as_ref());
         if ret.len() > sep.as_ref().len() {
             ret.replace_range((ret.len() - sep.as_ref().len()).., "");
         }
@@ -120,9 +119,7 @@ pub trait ToTomlComment {
 
 impl ToTomlComment for &str {
     fn to_toml_comment(&self) -> String {
-        self.lines()
-            .map(|x| format!("# {x}"))
-            .join("\n")
+        self.lines().map(|x| format!("# {x}")).join("\n")
     }
 }
 
@@ -131,7 +128,6 @@ impl ToTomlComment for String {
         self.as_str().to_toml_comment()
     }
 }
-
 
 #[cfg(test)]
 mod tests {

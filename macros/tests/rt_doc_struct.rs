@@ -40,8 +40,14 @@ fn mixed() {
         pub x: u32,
     }
 
-    assert_eq!(Foo::doc(), r#"- How much watch?
-- Six watch"#);
-    assert_eq!(Foo::doc_x(), r#"- Such much?
-- For whom how"#);
+    assert_eq!(
+        Foo::doc(),
+        r#"- How much watch?
+- Six watch"#
+    );
+    assert_eq!(
+        Foo::doc_x(),
+        r#"- Such much?
+- For whom how"#
+    );
 }

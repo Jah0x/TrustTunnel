@@ -1,3 +1,5 @@
+# TrustTunnel
+
 <p align="center">
 <picture>
 <source media="(prefers-color-scheme: dark)" srcset="https://cdn.adguardcdn.com/website/github.com/TrustTunnel/logo_dark.svg" width="300px" alt="TrustTunnel" />

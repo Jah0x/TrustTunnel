@@ -1,6 +1,5 @@
 use bytes::Bytes;
 
-
 pub(crate) enum DecodeResult<D> {
     /// A datagram is not fully received, waiting for the next data chunk
     WantMore,

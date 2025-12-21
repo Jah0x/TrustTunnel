@@ -1,15 +1,18 @@
-use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Duration;
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
+use base64::Engine;
 use futures::future;
 use http::Request;
 use log::info;
+use std::future::Future;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use trusttunnel::authentication;
-use trusttunnel::settings::{ForwardProtocolSettings, Http1Settings, ListenProtocolSettings, Settings, Socks5ForwarderSettings, TlsHostInfo, TlsHostsSettings};
+use trusttunnel::settings::{
+    ForwardProtocolSettings, Http1Settings, ListenProtocolSettings, Settings,
+    Socks5ForwarderSettings, TlsHostInfo, TlsHostsSettings,
+};
 
 #[allow(dead_code)]
 mod common;
@@ -110,9 +113,14 @@ async fn authenticator_present_socks_standard_auth() {
     }
 }
 
-async fn run_endpoint(listen_address: &SocketAddr, with_auth: bool, socks_proxy: Option<SocketAddr>) {
+async fn run_endpoint(
+    listen_address: &SocketAddr,
+    with_auth: bool,
+    socks_proxy: Option<SocketAddr>,
+) {
     let mut builder = Settings::builder()
-        .listen_address(listen_address).unwrap()
+        .listen_address(listen_address)
+        .unwrap()
         .listen_protocols(ListenProtocolSettings {
             http1: Some(Http1Settings::builder().build()),
             ..Default::default()
@@ -124,15 +132,17 @@ async fn run_endpoint(listen_address: &SocketAddr, with_auth: bool, socks_proxy:
             authentication::registry_based::Client {
                 username: "a".into(),
                 password: "b".into(),
-            }
+            },
         )));
     }
 
     if let Some(address) = socks_proxy {
         builder = builder.forwarder_settings(ForwardProtocolSettings::Socks5(
             Socks5ForwarderSettings::builder()
-                .server_address(address).unwrap()
-                .build().unwrap()
+                .server_address(address)
+                .unwrap()
+                .build()
+                .unwrap(),
         ));
     }
 
@@ -146,7 +156,8 @@ async fn run_endpoint(listen_address: &SocketAddr, with_auth: bool, socks_proxy:
             cert_chain_path: cert_key_path.to_string(),
             private_key_path: cert_key_path.to_string(),
         }])
-        .build().unwrap();
+        .build()
+        .unwrap();
 
     common::run_endpoint_with_settings(settings, hosts_settings).await;
 }
@@ -155,15 +166,13 @@ async fn do_connect_request(
     endpoint_address: &SocketAddr,
     proxy_auth: Option<String>,
 ) -> http::StatusCode {
-    let stream = common::establish_tls_connection(
-        common::MAIN_DOMAIN_NAME,
-        endpoint_address,
-        None,
-    ).await;
+    let stream =
+        common::establish_tls_connection(common::MAIN_DOMAIN_NAME, endpoint_address, None).await;
 
     let (mut request, conn_driver) = hyper::client::conn::Builder::new()
         .handshake(stream)
-        .await.unwrap();
+        .await
+        .unwrap();
 
     let exchange = async move {
         let mut rr = Request::builder()
@@ -178,8 +187,7 @@ async fn do_connect_request(
             );
         }
 
-        let rr = rr.body(hyper::Body::empty())
-            .unwrap();
+        let rr = rr.body(hyper::Body::empty()).unwrap();
         let response = request.send_request(rr).await.unwrap();
         info!("CONNECT response: {:?}", response);
         response.status()
@@ -193,7 +201,7 @@ async fn do_connect_request(
     }
 }
 
-fn make_socks_server_harness() -> (SocketAddr, impl Future<Output=Vec<u8>>) {
+fn make_socks_server_harness() -> (SocketAddr, impl Future<Output = Vec<u8>>) {
     let server = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let server_addr = server.local_addr().unwrap();
 

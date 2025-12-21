@@ -1,20 +1,23 @@
+use crate::downstream::Downstream;
+use crate::http_codec::HttpCodec;
+use crate::net_utils::TcpDestination;
+use crate::settings::Settings;
+use crate::shutdown::Shutdown;
+use crate::tls_demultiplexer::Protocol;
+use crate::{
+    authentication, datagram_pipe, downstream, http_codec, http_datagram_codec, http_demultiplexer,
+    http_forwarded_stream, http_icmp_codec, http_ping_handler, http_speedtest_handler,
+    http_udp_codec, log_id, log_utils, net_utils, pipe, reverse_proxy, tunnel,
+};
+use async_trait::async_trait;
+use bytes::Bytes;
+use http::StatusCode;
+use http_demultiplexer::HttpDemux;
 use std::collections::LinkedList;
 use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
-use http::StatusCode;
-use async_trait::async_trait;
-use bytes::Bytes;
-use http_demultiplexer::HttpDemux;
-use crate::downstream::Downstream;
-use crate::{authentication, datagram_pipe, downstream, http_codec, http_datagram_codec, http_demultiplexer, http_forwarded_stream, http_icmp_codec, http_ping_handler, http_speedtest_handler, http_udp_codec, log_id, log_utils, net_utils, pipe, reverse_proxy, tunnel};
-use crate::tls_demultiplexer::Protocol;
-use crate::http_codec::HttpCodec;
-use crate::net_utils::TcpDestination;
-use crate::settings::Settings;
-use crate::shutdown::Shutdown;
-
 
 const HEALTH_CHECK_AUTHORITY: &str = "_check";
 const UDP_AUTHORITY: &str = "_udp2";
@@ -24,11 +27,9 @@ const AUTHORIZATION_FAILURE_STATUS_CODE: StatusCode = StatusCode::PROXY_AUTHENTI
 const AUTHORIZATION_FAILURE_EXTRA_HEADER: (&str, &str) =
     ("proxy-authenticate", "Basic realm=Authorization Required");
 
-
 const BAD_STATUS_CODE: StatusCode = StatusCode::BAD_GATEWAY;
 const WARNING_HEADER_NAME: &str = "X-Warning";
 const DNS_WARNING_HEADER_NAME: &str = "X-Adguard-Vpn-Error";
-
 
 pub(crate) struct HttpDownstream {
     core_settings: Arc<Settings>,
@@ -83,7 +84,9 @@ impl HttpDownstream {
 
 #[async_trait]
 impl Downstream for HttpDownstream {
-    async fn listen(&mut self) -> io::Result<Option<Box<dyn downstream::PendingMultiplexedRequest>>> {
+    async fn listen(
+        &mut self,
+    ) -> io::Result<Option<Box<dyn downstream::PendingMultiplexedRequest>>> {
         loop {
             let stream = match self.codec.listen().await? {
                 None => return Ok(None),
@@ -91,14 +94,23 @@ impl Downstream for HttpDownstream {
             };
             let request = stream.request().request();
             let stream_id = stream.id();
-            log_id!(debug, stream_id, "Received request: {:?}", net_utils::scrub_request(request));
+            log_id!(
+                debug,
+                stream_id,
+                "Received request: {:?}",
+                net_utils::scrub_request(request)
+            );
 
             let protocol = self.protocol();
             let settings = self.core_settings.clone();
             let shutdown = self.shutdown.clone();
             match self.request_demux.select(self.protocol(), request) {
-                net_utils::Channel::Tunnel =>
-                    break Ok(Some(Box::new(PendingRequest { stream, id: stream_id }))),
+                net_utils::Channel::Tunnel => {
+                    break Ok(Some(Box::new(PendingRequest {
+                        stream,
+                        id: stream_id,
+                    })))
+                }
                 net_utils::Channel::Ping => {
                     tokio::spawn(async move {
                         http_ping_handler::listen(
@@ -106,7 +118,8 @@ impl Downstream for HttpDownstream {
                             Box::new(http_codec::stream_into_codec(stream, protocol)),
                             settings.tls_handshake_timeout,
                             stream_id,
-                        ).await
+                        )
+                        .await
                     });
                 }
                 net_utils::Channel::Speedtest => {
@@ -116,7 +129,8 @@ impl Downstream for HttpDownstream {
                             Box::new(http_codec::stream_into_codec(stream, protocol)),
                             settings.tls_handshake_timeout,
                             stream_id,
-                        ).await
+                        )
+                        .await
                     });
                 }
                 net_utils::Channel::ReverseProxy => {
@@ -129,7 +143,8 @@ impl Downstream for HttpDownstream {
                                 Box::new(http_codec::stream_into_codec(stream, protocol)),
                                 sni,
                                 stream_id,
-                            ).await
+                            )
+                            .await
                         }
                     });
                 }
@@ -195,17 +210,20 @@ impl downstream::PendingTcpConnectRequest for TcpConnection {
             Ok(a) => TcpDestination::Address(a),
             Err(_) => {
                 let port = if request.request().method == http::Method::CONNECT {
-                    authority.port_u16()
-                        .ok_or_else(|| io::Error::new(
+                    authority.port_u16().ok_or_else(|| {
+                        io::Error::new(
                             ErrorKind::Other,
-                            format!("Unexpected authority port: request={:?}", request.request())
-                        ))?
+                            format!("Unexpected authority port: request={:?}", request.request()),
+                        )
+                    })?
                 } else {
-                    authority.port_u16().unwrap_or(net_utils::PLAIN_HTTP_PORT_NUMBER)
+                    authority
+                        .port_u16()
+                        .unwrap_or(net_utils::PLAIN_HTTP_PORT_NUMBER)
                 };
 
                 TcpDestination::HostName((authority.host().to_string(), port))
-            },
+            }
         })
     }
 
@@ -221,22 +239,32 @@ impl downstream::PendingRequest for PendingRequest {
         let request = self.stream.request().request();
 
         match request.uri.authority().map(http::uri::Authority::as_str) {
-            Some(HEALTH_CHECK_AUTHORITY) if request.method == http::Method::CONNECT =>
-                self.stream.split().1.send_ok_response(true).map(|_| None),
-            Some(UDP_AUTHORITY) | Some(ICMP_AUTHORITY) if request.method == http::Method::CONNECT =>
-                Ok(Some(downstream::PendingDemultiplexedRequest::DatagramMultiplexer(Box::new(DatagramMultiplexer {
-                    stream: self.stream,
-                    id: self.id,
-                })))),
+            Some(HEALTH_CHECK_AUTHORITY) if request.method == http::Method::CONNECT => {
+                self.stream.split().1.send_ok_response(true).map(|_| None)
+            }
+            Some(UDP_AUTHORITY) | Some(ICMP_AUTHORITY)
+                if request.method == http::Method::CONNECT =>
+            {
+                Ok(Some(
+                    downstream::PendingDemultiplexedRequest::DatagramMultiplexer(Box::new(
+                        DatagramMultiplexer {
+                            stream: self.stream,
+                            id: self.id,
+                        },
+                    )),
+                ))
+            }
             Some(HEALTH_CHECK_AUTHORITY) | Some(UDP_AUTHORITY) | Some(ICMP_AUTHORITY) => {
                 log_id!(debug, self.id, "Unexpected request method: {:?}", request);
                 fail_request(self.stream, BAD_STATUS_CODE, vec![]);
                 Ok(None)
             }
-            _ => Ok(Some(downstream::PendingDemultiplexedRequest::TcpConnect(Box::new(TcpConnection {
-                stream: self.stream,
-                id: self.id,
-            })))),
+            _ => Ok(Some(downstream::PendingDemultiplexedRequest::TcpConnect(
+                Box::new(TcpConnection {
+                    stream: self.stream,
+                    id: self.id,
+                }),
+            ))),
         }
     }
 
@@ -269,19 +297,17 @@ impl downstream::PendingRequest for DatagramMultiplexer {
                     encoder: Box::<http_udp_codec::Encoder>::default(),
                 }),
             )),
-            ICMP_AUTHORITY => {
-                Ok(downstream::DatagramPipeHalves::Icmp(
-                    Box::new(DatagramDecoder {
-                        source: source.finalize(),
-                        decoder: Box::new(http_icmp_codec::Decoder::new()),
-                        pending_bytes: Default::default(),
-                    }),
-                    Box::new(DatagramEncoder {
-                        sink: sink.send_ok_response(false)?.into_datagram_sink(),
-                        encoder: Box::<http_icmp_codec::Encoder>::default(),
-                    }),
-                ))
-            },
+            ICMP_AUTHORITY => Ok(downstream::DatagramPipeHalves::Icmp(
+                Box::new(DatagramDecoder {
+                    source: source.finalize(),
+                    decoder: Box::new(http_icmp_codec::Decoder::new()),
+                    pending_bytes: Default::default(),
+                }),
+                Box::new(DatagramEncoder {
+                    sink: sink.send_ok_response(false)?.into_datagram_sink(),
+                    encoder: Box::<http_icmp_codec::Encoder>::default(),
+                }),
+            )),
             _ => unreachable!(),
         }
     }
@@ -324,7 +350,7 @@ impl<D> datagram_pipe::Source for DatagramDecoder<D> {
                         bytes
                     }
                     pipe::Data::Eof => return Err(io::Error::from(ErrorKind::UnexpectedEof)),
-                }
+                },
                 Some(bytes) => bytes,
             };
 
@@ -364,16 +390,25 @@ fn tunnel_error_to_status_code(error: &tunnel::ConnectionError) -> StatusCode {
     }
 }
 
-fn tunnel_error_to_warn_header(error: &tunnel::ConnectionError, hostname: &str) -> Vec<(String, String)> {
+fn tunnel_error_to_warn_header(
+    error: &tunnel::ConnectionError,
+    hostname: &str,
+) -> Vec<(String, String)> {
     match error {
-        tunnel::ConnectionError::Io(_) =>
-            vec![(WARNING_HEADER_NAME.to_string(), "300 - Connection failed for some reason".to_string())],
-        tunnel::ConnectionError::Authentication(_) =>
-            vec![(AUTHORIZATION_FAILURE_EXTRA_HEADER.0.to_string(), AUTHORIZATION_FAILURE_EXTRA_HEADER.1.to_string())],
-        tunnel::ConnectionError::Timeout =>
-            vec![(WARNING_HEADER_NAME.to_string(), format!("302 - {}", error))],
-        tunnel::ConnectionError::HostUnreachable =>
-            vec![(WARNING_HEADER_NAME.to_string(), format!("301 - {}", error))],
+        tunnel::ConnectionError::Io(_) => vec![(
+            WARNING_HEADER_NAME.to_string(),
+            "300 - Connection failed for some reason".to_string(),
+        )],
+        tunnel::ConnectionError::Authentication(_) => vec![(
+            AUTHORIZATION_FAILURE_EXTRA_HEADER.0.to_string(),
+            AUTHORIZATION_FAILURE_EXTRA_HEADER.1.to_string(),
+        )],
+        tunnel::ConnectionError::Timeout => {
+            vec![(WARNING_HEADER_NAME.to_string(), format!("302 - {}", error))]
+        }
+        tunnel::ConnectionError::HostUnreachable => {
+            vec![(WARNING_HEADER_NAME.to_string(), format!("301 - {}", error))]
+        }
         tunnel::ConnectionError::DnsNonroutable => vec![
             (DNS_WARNING_HEADER_NAME.to_string(), hostname.to_string()),
             (WARNING_HEADER_NAME.to_string(), format!("310 - {}", error)),
@@ -382,12 +417,18 @@ fn tunnel_error_to_warn_header(error: &tunnel::ConnectionError, hostname: &str) 
             (DNS_WARNING_HEADER_NAME.to_string(), hostname.to_string()),
             (WARNING_HEADER_NAME.to_string(), format!("311 - {}", error)),
         ],
-        tunnel::ConnectionError::Other(_) =>
-            vec![(WARNING_HEADER_NAME.to_string(), "300 - Connection failed for some reason".to_string())],
+        tunnel::ConnectionError::Other(_) => vec![(
+            WARNING_HEADER_NAME.to_string(),
+            "300 - Connection failed for some reason".to_string(),
+        )],
     }
 }
 
-fn fail_request(stream: Box<dyn http_codec::Stream>, status: StatusCode, extra_headers: Vec<(String, String)>) {
+fn fail_request(
+    stream: Box<dyn http_codec::Stream>,
+    status: StatusCode,
+    extra_headers: Vec<(String, String)>,
+) {
     let id = stream.id();
     if let Err(e) = stream.split().1.send_bad_response(status, extra_headers) {
         log_id!(debug, id, "Failed to send bad response: {}", e);
@@ -400,7 +441,8 @@ fn fail_request_with_error(stream: Box<dyn http_codec::Stream>, error: tunnel::C
 }
 
 fn request_hostname(request: &dyn http_codec::PendingRequest) -> &str {
-    request.authority()
+    request
+        .authority()
         .map(http::uri::Authority::as_str)
         .unwrap_or_default()
 }

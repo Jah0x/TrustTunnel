@@ -1,13 +1,12 @@
+use crate::net_utils;
+use async_trait::async_trait;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
+use smallvec::{smallvec, SmallVec};
 use std::borrow::Cow;
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use async_trait::async_trait;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use smallvec::{SmallVec, smallvec};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
-use crate::net_utils;
-
 
 const PROTOCOL_VERSION: u8 = 0x05;
 const RESERVED: u8 = 0x00;
@@ -30,7 +29,7 @@ const EXTENDED_AUTHENTICATION_TERM_TYPE_CODE: u8 = 0x00;
 const EXTENDED_AUTHENTICATION_TERM_VAL_LENGTH: u16 = 0x00;
 
 // smallvec does not allow bigger arrays
-type MaxStackSmallVec = SmallVec::<[u8; 512]>;
+type MaxStackSmallVec = SmallVec<[u8; 512]>;
 
 #[derive(Debug)]
 pub(crate) enum Error {
@@ -129,8 +128,12 @@ impl<'this> ExtendedAuthenticationValue<'this> {
         match self {
             Self::Domain(x) => ExtendedAuthenticationValue::Domain(Cow::Owned(x.into_owned())),
             Self::ClientAddress(x) => ExtendedAuthenticationValue::ClientAddress(x),
-            Self::UserAgent(x) => ExtendedAuthenticationValue::UserAgent(Cow::Owned(x.into_owned())),
-            Self::BasicProxyAuth(x) => ExtendedAuthenticationValue::BasicProxyAuth(Cow::Owned(x.into_owned())),
+            Self::UserAgent(x) => {
+                ExtendedAuthenticationValue::UserAgent(Cow::Owned(x.into_owned()))
+            }
+            Self::BasicProxyAuth(x) => {
+                ExtendedAuthenticationValue::BasicProxyAuth(Cow::Owned(x.into_owned()))
+            }
             Self::SniAuth => ExtendedAuthenticationValue::SniAuth,
         }
     }
@@ -189,11 +192,9 @@ impl<'this> Authentication<'this> {
                 Cow::Owned(u.into_owned()),
                 Cow::Owned(p.into_owned()),
             ),
-            Self::Extended(values) => Authentication::Extended(
-                values.into_iter()
-                    .map(|x| x.into_owned())
-                    .collect()
-            ),
+            Self::Extended(values) => {
+                Authentication::Extended(values.into_iter().map(|x| x.into_owned()).collect())
+            }
         }
     }
 }
@@ -286,18 +287,18 @@ struct Reply {
     bound_port: u16,
 }
 
-
 #[async_trait]
 trait SocksWriter: AsyncWriteExt + Sized + Unpin {
-    async fn write_selection_message(&mut self, methods: &[AuthenticationMethod]) -> Result<(), Error> {
+    async fn write_selection_message(
+        &mut self,
+        methods: &[AuthenticationMethod],
+    ) -> Result<(), Error> {
         if methods.len() > MAX_AUTH_METHODS_NUM {
             return Err(Error::Protocol("Too many methods".to_string()));
         }
 
         let mut buf = SmallVec::<[u8; 32]>::with_capacity(
-            std::mem::size_of_val(&PROTOCOL_VERSION)
-                + std::mem::size_of::<u8>()
-                + methods.len()
+            std::mem::size_of_val(&PROTOCOL_VERSION) + std::mem::size_of::<u8>() + methods.len(),
         );
 
         buf.push(PROTOCOL_VERSION);
@@ -315,7 +316,7 @@ trait SocksWriter: AsyncWriteExt + Sized + Unpin {
                         + std::mem::size_of::<u8>()
                         + username.len()
                         + std::mem::size_of::<u8>()
-                        + password.len()
+                        + password.len(),
                 );
 
                 buf.push(USERNAME_PASSWORD_AUTHENTICATION_VER);
@@ -341,21 +342,25 @@ trait SocksWriter: AsyncWriteExt + Sized + Unpin {
         self.write_all(&buf).await.map_err(Error::Io)
     }
 
-    async fn write_request(&mut self, command: u8, destination: &Address<'_>, port: u16)
-                           -> Result<(), Error>
-    {
+    async fn write_request(
+        &mut self,
+        command: u8,
+        destination: &Address<'_>,
+        port: u16,
+    ) -> Result<(), Error> {
         let mut buf = MaxStackSmallVec::with_capacity(
             std::mem::size_of_val(&PROTOCOL_VERSION)
                 + std::mem::size_of_val(&command)
                 + std::mem::size_of_val(&RESERVED)
                 + std::mem::size_of_val(&destination.address_type())
                 + match destination {
-                Address::IpAddress(IpAddr::V4(_)) => net_utils::IPV4_WIRE_LENGTH,
-                Address::IpAddress(IpAddr::V6(_)) => net_utils::IPV6_WIRE_LENGTH,
-                Address::DomainName(x) =>
-                    std::mem::size_of::<u8>() + x.len().min(MAX_DOMAIN_NAME_LENGTH),
-            }
-                + std::mem::size_of_val(&port)
+                    Address::IpAddress(IpAddr::V4(_)) => net_utils::IPV4_WIRE_LENGTH,
+                    Address::IpAddress(IpAddr::V6(_)) => net_utils::IPV6_WIRE_LENGTH,
+                    Address::DomainName(x) => {
+                        std::mem::size_of::<u8>() + x.len().min(MAX_DOMAIN_NAME_LENGTH)
+                    }
+                }
+                + std::mem::size_of_val(&port),
         );
 
         buf.push(PROTOCOL_VERSION);
@@ -370,7 +375,9 @@ trait SocksWriter: AsyncWriteExt + Sized + Unpin {
                 buf.push(x.len() as u8);
                 buf.extend_from_slice(x.as_bytes());
             }
-            Address::DomainName(_) => return Err(Error::Protocol("Too long domain name".to_string())),
+            Address::DomainName(_) => {
+                return Err(Error::Protocol("Too long domain name".to_string()))
+            }
         }
 
         put_u16(&mut buf, port);
@@ -384,7 +391,10 @@ trait SocksReader: AsyncReadExt + Unpin {
     async fn read_version(&mut self) -> Result<(), Error> {
         let version = self.read_u8().await.map_err(Error::Io)?;
         if version != PROTOCOL_VERSION {
-            return Err(Error::Protocol(format!("Unexpected protocol version: {}", version)));
+            return Err(Error::Protocol(format!(
+                "Unexpected protocol version: {}",
+                version
+            )));
         }
 
         Ok(())
@@ -401,7 +411,10 @@ trait SocksReader: AsyncReadExt + Unpin {
     async fn read_authentication_response(&mut self) -> Result<(), Error> {
         let version = self.read_u8().await.map_err(Error::Io)?;
         if version != USERNAME_PASSWORD_AUTHENTICATION_VER {
-            return Err(Error::Protocol(format!("Unexpected authentication version: {}", version)));
+            return Err(Error::Protocol(format!(
+                "Unexpected authentication version: {}",
+                version
+            )));
         }
 
         let status = self.read_u8().await.map_err(Error::Io)?;
@@ -420,7 +433,10 @@ trait SocksReader: AsyncReadExt + Unpin {
 
         let reserved = self.read_u8().await.map_err(Error::Io)?;
         if reserved != RESERVED {
-            return Err(Error::Protocol(format!("Unexpected reserved field value: {}", reserved)));
+            return Err(Error::Protocol(format!(
+                "Unexpected reserved field value: {}",
+                reserved
+            )));
         }
 
         let address = match self.read_u8().await.map_err(Error::Io)? {
@@ -438,10 +454,9 @@ trait SocksReader: AsyncReadExt + Unpin {
                 let length = self.read_u8().await.map_err(Error::Io)?;
                 let mut buf = vec![0; length as usize];
                 self.read_exact(&mut buf).await.map_err(Error::Io)?;
-                Address::DomainName(Cow::from(
-                    String::from_utf8(buf)
-                        .map_err(|e| Error::Protocol(format!("Domain name parse failure: {}", e)))?
-                ))
+                Address::DomainName(Cow::from(String::from_utf8(buf).map_err(|e| {
+                    Error::Protocol(format!("Domain name parse failure: {}", e))
+                })?))
             }
             x => return Err(Error::Protocol(format!("Unexpected address type: {}", x))),
         };
@@ -459,8 +474,8 @@ pub(crate) async fn connect<IO>(
     auth: Option<Authentication<'_>>,
     request: Request<'_>,
 ) -> Result<ConnectResult<IO>, Error>
-    where
-        IO: AsyncWriteExt + AsyncReadExt + Send + Unpin,
+where
+    IO: AsyncWriteExt + AsyncReadExt + Send + Unpin,
 {
     connect_inner(io, auth, request).await
 }
@@ -476,44 +491,54 @@ async fn connect_inner<IO>(
     auth: Option<Authentication<'_>>,
     request: Request<'_>,
 ) -> Result<ConnectResult<IO>, Error>
-    where
-        IO: SocksWriter + SocksReader + Send,
+where
+    IO: SocksWriter + SocksReader + Send,
 {
     io.write_selection_message(&[
         auth.as_ref()
             .map(Authentication::to_method)
             .unwrap_or(AuthenticationMethod::NoAuth),
         AuthenticationMethod::NoAuth,
-    ]).await?;
+    ])
+    .await?;
 
     match (io.read_selection_response().await?, auth.as_ref()) {
         (AuthenticationMethod::NoAuth, _) => {}
         (AuthenticationMethod::UsernamePassword, Some(Authentication::UsernamePassword(..)))
-        | (AuthenticationMethod::ExtendedAuth, Some(Authentication::Extended(_)))
-        => {
-            io.write_authentication_message(auth.as_ref().unwrap()).await?;
+        | (AuthenticationMethod::ExtendedAuth, Some(Authentication::Extended(_))) => {
+            io.write_authentication_message(auth.as_ref().unwrap())
+                .await?;
             io.read_authentication_response().await?;
         }
-        (AuthenticationMethod::NoAcceptable, _) => return Err(
-            Error::Authentication("Server rejected offered authentication methods".to_string())
-        ),
-        _ => return Err(
-            Error::Authentication("Server selected non-offered authentication method".to_string())
-        ),
+        (AuthenticationMethod::NoAcceptable, _) => {
+            return Err(Error::Authentication(
+                "Server rejected offered authentication methods".to_string(),
+            ))
+        }
+        _ => {
+            return Err(Error::Authentication(
+                "Server selected non-offered authentication method".to_string(),
+            ))
+        }
     }
 
     let (destination, port, udp_socket) = match &request {
         Request::Connect(d, p) => (d.clone(), *p, None),
         Request::UdpAssociate => {
-            let socket = UdpSocket::bind(
-                SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))
-            ).await.map_err(Error::Io)?;
+            let socket = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))
+                .await
+                .map_err(Error::Io)?;
             let bound_address = socket.local_addr().map_err(Error::Io)?;
-            (Address::IpAddress(bound_address.ip()), bound_address.port(), Some(socket))
+            (
+                Address::IpAddress(bound_address.ip()),
+                bound_address.port(),
+                Some(socket),
+            )
         }
     };
 
-    io.write_request(request.command_code(), &destination, port).await?;
+    io.write_request(request.command_code(), &destination, port)
+        .await?;
 
     let reply = io.read_reply().await?;
     if reply.code != ReplyCode::Succeeded {
@@ -525,11 +550,16 @@ async fn connect_inner<IO>(
         Request::UdpAssociate => {
             let bound_address = match reply.bound_address {
                 Address::IpAddress(x) => SocketAddr::from((x, reply.bound_port)),
-                Address::DomainName(x) => return Err(
-                    Error::Protocol(format!("Unexpected bound address: {}", x))
-                ),
+                Address::DomainName(x) => {
+                    return Err(Error::Protocol(format!("Unexpected bound address: {}", x)))
+                }
             };
-            udp_socket.as_ref().unwrap().connect(bound_address).await.map_err(Error::Io)?;
+            udp_socket
+                .as_ref()
+                .unwrap()
+                .connect(bound_address)
+                .await
+                .map_err(Error::Io)?;
             Ok(ConnectResult::UdpAssociation(UdpAssociation {
                 socket: udp_socket.unwrap(),
                 _stream: io,
@@ -545,7 +575,11 @@ impl<S> UdpAssociation<S> {
 
     pub async fn send_to(&self, data: &[u8], destination: SocketAddr) -> Result<(), Error> {
         let mut buf = BytesMut::with_capacity(udp_buffer_size(
-            if destination.is_ipv4() { net_utils::IPV4_WIRE_LENGTH } else { net_utils::IPV6_WIRE_LENGTH },
+            if destination.is_ipv4() {
+                net_utils::IPV4_WIRE_LENGTH
+            } else {
+                net_utils::IPV6_WIRE_LENGTH
+            },
             data.len(),
         ));
 
@@ -568,9 +602,7 @@ impl<S> UdpAssociation<S> {
         buf.put_u16(destination.port());
         buf.put(data);
 
-        self.socket.send(&buf).await
-            .map(|_| ())
-            .map_err(Error::Io)
+        self.socket.send(&buf).await.map(|_| ()).map_err(Error::Io)
     }
 
     pub async fn recv_from(&self, data: &mut [u8]) -> Result<(usize, SocketAddr), Error> {
@@ -601,7 +633,9 @@ impl<S> UdpAssociation<S> {
             }
             ADDRESS_TYPE_IP_V6 => {
                 if buf.remaining() < net_utils::IPV6_WIRE_LENGTH {
-                    return Err(Error::Protocol("Packet length doesn't conform to announced address type".to_string()));
+                    return Err(Error::Protocol(
+                        "Packet length doesn't conform to announced address type".to_string(),
+                    ));
                 }
 
                 let mut addr_octets = [0; net_utils::IPV6_WIRE_LENGTH];
@@ -634,11 +668,11 @@ const fn udp_buffer_size(address_size: usize, data_cap: usize) -> usize {
 }
 
 fn write_extended_authentication_value<A>(
-    buf: &mut SmallVec<A>, value: &ExtendedAuthenticationValue,
-)
-    -> Result<(), Error>
-    where
-        A: smallvec::Array<Item=u8>,
+    buf: &mut SmallVec<A>,
+    value: &ExtendedAuthenticationValue,
+) -> Result<(), Error>
+where
+    A: smallvec::Array<Item = u8>,
 {
     buf.push(value.type_code());
 
@@ -660,7 +694,7 @@ fn write_extended_authentication_value<A>(
                 put_u16(buf, net_utils::IPV6_WIRE_LENGTH as u16);
                 buf.extend_from_slice(&x.octets());
             }
-        }
+        },
         ExtendedAuthenticationValue::UserAgent(x) => {
             if x.len() > u16::MAX as usize {
                 return Err(Error::Protocol("Too long User-Agent".to_string()));
@@ -686,8 +720,8 @@ fn write_extended_authentication_value<A>(
 }
 
 fn write_extended_authentication_term_value<A>(buf: &mut SmallVec<A>) -> Result<(), Error>
-    where
-        A: smallvec::Array<Item=u8>,
+where
+    A: smallvec::Array<Item = u8>,
 {
     buf.push(EXTENDED_AUTHENTICATION_TERM_TYPE_CODE);
     put_u16(buf, EXTENDED_AUTHENTICATION_TERM_VAL_LENGTH);
@@ -695,8 +729,8 @@ fn write_extended_authentication_term_value<A>(buf: &mut SmallVec<A>) -> Result<
 }
 
 fn put_u16<A>(buf: &mut SmallVec<A>, x: u16)
-    where
-        A: smallvec::Array<Item=u8>,
+where
+    A: smallvec::Array<Item = u8>,
 {
     buf.extend_from_slice(&x.to_ne_bytes())
 }

@@ -1,12 +1,12 @@
+use bytes::BufMut;
+use futures::{future, FutureExt, StreamExt};
+use http::Request;
+use log::info;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::Pin;
 use std::thread;
 use std::time::Duration;
-use bytes::BufMut;
-use futures::{future, FutureExt, StreamExt};
-use http::Request;
-use log::info;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 use trusttunnel::net_utils;
@@ -18,7 +18,8 @@ const TCP_CONTENT_SIZE: usize = 2 * 1024 * 1024;
 const UDP_CHUNK_SIZE: usize = 1024;
 const UDP_CONTENT_SIZE: usize = 8 * UDP_CHUNK_SIZE;
 const MANGLED_UDP_HEADER_LENGTH: usize = 4 + 2 * (16 + 2);
-const EXPECTED_MANGLED_UDP_LENGTH: usize = UDP_CONTENT_SIZE + (UDP_CONTENT_SIZE / UDP_CHUNK_SIZE) * MANGLED_UDP_HEADER_LENGTH;
+const EXPECTED_MANGLED_UDP_LENGTH: usize =
+    UDP_CONTENT_SIZE + (UDP_CONTENT_SIZE / UDP_CHUNK_SIZE) * MANGLED_UDP_HEADER_LENGTH;
 
 macro_rules! tcp_download_tests {
     ($($name:ident: $make_tunnel_fn:expr,)*) => {
@@ -161,12 +162,11 @@ async fn h2_udp_download() {
     };
 
     tokio::select! {
-                _ = common::run_endpoint(&endpoint_address) => unreachable!(),
-                _ = client_task => (),
-                _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("Timed out"),
-            }
+        _ = common::run_endpoint(&endpoint_address) => unreachable!(),
+        _ = client_task => (),
+        _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("Timed out"),
+    }
 }
-
 
 #[tokio::test]
 async fn h2_udp_upload() {
@@ -189,7 +189,10 @@ async fn h2_udp_upload() {
             }
 
             let mut ack = [0; UDP_CHUNK_SIZE];
-            assert_eq!(io.read(&mut ack).await.unwrap(), MANGLED_UDP_HEADER_LENGTH + 1);
+            assert_eq!(
+                io.read(&mut ack).await.unwrap(),
+                MANGLED_UDP_HEADER_LENGTH + 1
+            );
         };
 
         futures::pin_mut!(exchange);
@@ -218,16 +221,16 @@ async fn h3_tcp_download() {
         let server_address = run_tcp_server(true);
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let mut conn = common::Http3Session::connect(
-            &endpoint_address,
-            common::MAIN_DOMAIN_NAME,
-            None,
-        ).await;
+        let mut conn =
+            common::Http3Session::connect(&endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
 
-        let (response, _) = conn.exchange(
-            Request::connect(server_address.to_string())
-                .body(hyper::Body::empty()).unwrap()
-        ).await;
+        let (response, _) = conn
+            .exchange(
+                Request::connect(server_address.to_string())
+                    .body(hyper::Body::empty())
+                    .unwrap(),
+            )
+            .await;
         assert_eq!(response.status, http::StatusCode::OK);
 
         let mut total = 0;
@@ -257,19 +260,20 @@ async fn h3_tcp_upload() {
         let server_address = run_tcp_server(false);
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let mut conn = common::Http3Session::connect(
-            &endpoint_address,
-            common::MAIN_DOMAIN_NAME,
-            None,
-        ).await;
+        let mut conn =
+            common::Http3Session::connect(&endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
 
-        let (response, _) = conn.exchange(
-            Request::connect(server_address.to_string())
-                .body(hyper::Body::empty()).unwrap()
-        ).await;
+        let (response, _) = conn
+            .exchange(
+                Request::connect(server_address.to_string())
+                    .body(hyper::Body::empty())
+                    .unwrap(),
+            )
+            .await;
         assert_eq!(response.status, http::StatusCode::OK);
 
-        conn.send(common::make_stream_of_chunks(TCP_CONTENT_SIZE, None)).await;
+        conn.send(common::make_stream_of_chunks(TCP_CONTENT_SIZE, None))
+            .await;
         let mut ack = [0; 1];
         assert_eq!(conn.recv(&mut ack).await, 1);
     };
@@ -290,20 +294,21 @@ async fn h3_udp_download() {
         let server_address = run_udp_server(true);
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let mut conn = common::Http3Session::connect(
-            &endpoint_address,
-            common::MAIN_DOMAIN_NAME,
-            None,
-        ).await;
+        let mut conn =
+            common::Http3Session::connect(&endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
 
-        let (response, _) = conn.exchange(
-            Request::connect("_udp2")
-                .body(hyper::Body::empty()).unwrap()
-        ).await;
+        let (response, _) = conn
+            .exchange(
+                Request::connect("_udp2")
+                    .body(hyper::Body::empty())
+                    .unwrap(),
+            )
+            .await;
         assert_eq!(response.status, http::StatusCode::OK);
 
         let hole_puncher = encode_udp_chunk(&server_address, &[1]);
-        conn.send(futures::stream::iter(std::iter::once(hole_puncher))).await;
+        conn.send(futures::stream::iter(std::iter::once(hole_puncher)))
+            .await;
 
         let mut total = 0;
         let mut buf = [0; 64 * 1024];
@@ -332,22 +337,23 @@ async fn h3_udp_upload() {
         let server_address = run_udp_server(false);
         tokio::time::sleep(Duration::from_secs(1)).await;
 
-        let mut conn = common::Http3Session::connect(
-            &endpoint_address,
-            common::MAIN_DOMAIN_NAME,
-            None,
-        ).await;
+        let mut conn =
+            common::Http3Session::connect(&endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
 
-        let (response, _) = conn.exchange(
-            Request::connect("_udp2")
-                .body(hyper::Body::empty()).unwrap()
-        ).await;
+        let (response, _) = conn
+            .exchange(
+                Request::connect("_udp2")
+                    .body(hyper::Body::empty())
+                    .unwrap(),
+            )
+            .await;
         assert_eq!(response.status, http::StatusCode::OK);
 
         conn.send(
             common::make_stream_of_chunks(UDP_CONTENT_SIZE, Some(UDP_CHUNK_SIZE))
-                .map(|x| encode_udp_chunk(&server_address, x))
-        ).await;
+                .map(|x| encode_udp_chunk(&server_address, x)),
+        )
+        .await;
 
         let mut ack = [0; UDP_CHUNK_SIZE];
         assert_eq!(conn.recv(&mut ack).await, MANGLED_UDP_HEADER_LENGTH + 1);
@@ -361,21 +367,21 @@ async fn h3_udp_upload() {
 }
 
 async fn make_h1_tunnel(
-    endpoint_address: SocketAddr, server_address: String,
-) -> (Pin<Box<dyn Future<Output=()>>>, Pin<Box<dyn Future<Output=impl AsyncRead + AsyncWrite + Unpin + Send>>>) {
-    let stream = common::establish_tls_connection(
-        common::MAIN_DOMAIN_NAME,
-        &endpoint_address,
-        None,
-    ).await;
+    endpoint_address: SocketAddr,
+    server_address: String,
+) -> (
+    Pin<Box<dyn Future<Output = ()>>>,
+    Pin<Box<dyn Future<Output = impl AsyncRead + AsyncWrite + Unpin + Send>>>,
+) {
+    let stream =
+        common::establish_tls_connection(common::MAIN_DOMAIN_NAME, &endpoint_address, None).await;
 
     let (mut request, conn) = hyper::client::conn::Builder::new()
         .handshake(stream)
-        .await.unwrap();
+        .await
+        .unwrap();
 
-    let conn_driver = async move {
-        conn.await.unwrap()
-    }.boxed();
+    let conn_driver = async move { conn.await.unwrap() }.boxed();
 
     let exchange = async move {
         let rr = Request::builder()
@@ -389,28 +395,33 @@ async fn make_h1_tunnel(
         assert_eq!(response.status(), http::StatusCode::OK);
 
         hyper::upgrade::on(response).await.unwrap()
-    }.boxed();
+    }
+    .boxed();
 
     (conn_driver, exchange)
 }
 
 async fn make_h2_tunnel(
-    endpoint_address: SocketAddr, server_address: String,
-) -> (Pin<Box<dyn Future<Output=()>>>, Pin<Box<dyn Future<Output=impl AsyncRead + AsyncWrite + Unpin + Send>>>) {
+    endpoint_address: SocketAddr,
+    server_address: String,
+) -> (
+    Pin<Box<dyn Future<Output = ()>>>,
+    Pin<Box<dyn Future<Output = impl AsyncRead + AsyncWrite + Unpin + Send>>>,
+) {
     let stream = common::establish_tls_connection(
         common::MAIN_DOMAIN_NAME,
         &endpoint_address,
         Some(net_utils::HTTP2_ALPN.as_bytes()),
-    ).await;
+    )
+    .await;
 
     let (mut request, conn) = hyper::client::conn::Builder::new()
         .http2_only(true)
         .handshake(stream)
-        .await.unwrap();
+        .await
+        .unwrap();
 
-    let conn_driver = async move {
-        conn.await.unwrap()
-    }.boxed();
+    let conn_driver = async move { conn.await.unwrap() }.boxed();
 
     let exchange = async move {
         let rr = Request::builder()
@@ -424,7 +435,8 @@ async fn make_h2_tunnel(
         assert_eq!(response.status(), http::StatusCode::OK);
 
         hyper::upgrade::on(response).await.unwrap()
-    }.boxed();
+    }
+    .boxed();
 
     (conn_driver, exchange)
 }
@@ -434,7 +446,10 @@ fn run_tcp_server(is_download: bool) -> SocketAddr {
     let server_addr = server.local_addr().unwrap();
 
     thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async move {
             let server = TcpListener::from_std(server).unwrap();
             let (mut socket, peer) = server.accept().await.unwrap();
@@ -472,7 +487,10 @@ fn run_udp_server(is_download: bool) -> SocketAddr {
     let server_addr = server.local_addr().unwrap();
 
     thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async move {
             let server = UdpSocket::from_std(server).unwrap();
             if is_download {
@@ -480,7 +498,8 @@ fn run_udp_server(is_download: bool) -> SocketAddr {
                 let (n, peer) = server.recv_from(&mut buf).await.unwrap();
                 assert_eq!(n, 1);
 
-                let mut content = common::make_stream_of_chunks(UDP_CONTENT_SIZE, Some(UDP_CHUNK_SIZE));
+                let mut content =
+                    common::make_stream_of_chunks(UDP_CONTENT_SIZE, Some(UDP_CHUNK_SIZE));
                 while let Some(chunk) = content.next().await {
                     server.send_to(chunk, peer).await.unwrap();
                 }

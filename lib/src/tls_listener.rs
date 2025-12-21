@@ -1,12 +1,12 @@
+use crate::{log_utils, tls_demultiplexer};
+use rustls::{Certificate, PrivateKey, ServerConfig};
 use std::io;
 use std::io::ErrorKind;
 use std::sync::Arc;
-use rustls::{Certificate, PrivateKey, ServerConfig};
-use tokio::net::TcpStream;
-use tokio_rustls::{LazyConfigAcceptor, StartHandshake};
-use tokio_rustls::server::TlsStream;
 use tls_parser::{parse_tls_plaintext, TlsMessage};
-use crate::{log_utils, tls_demultiplexer};
+use tokio::net::TcpStream;
+use tokio_rustls::server::TlsStream;
+use tokio_rustls::{LazyConfigAcceptor, StartHandshake};
 
 pub(crate) struct TlsListener {}
 
@@ -47,7 +47,9 @@ impl TlsListener {
                         // Check if this is a ClientHello handshake
                         if matches!(handshake, tls_parser::TlsMessageHandshake::ClientHello(..)) {
                             // Extract the ClientHello data
-                            if let tls_parser::TlsMessageHandshake::ClientHello(client_hello) = handshake {
+                            if let tls_parser::TlsMessageHandshake::ClientHello(client_hello) =
+                                handshake
+                            {
                                 if client_hello.random.len() >= 32 {
                                     let client_random = client_hello.random[..32].to_vec();
 
@@ -70,7 +72,8 @@ impl TlsAcceptor {
     }
 
     pub fn alpn(&self) -> Vec<Vec<u8>> {
-        self.inner.client_hello()
+        self.inner
+            .client_hello()
             .alpn()
             .map(|x| x.map(Vec::from).collect())
             .unwrap_or_default()
@@ -92,9 +95,12 @@ impl TlsAcceptor {
                 .with_safe_defaults()
                 .with_no_client_auth()
                 .with_single_cert(cert_chain, key)
-                .map_err(|e| io::Error::new(
-                    ErrorKind::Other, format!("Failed to create TLS configuration: {}", e))
-                )?;
+                .map_err(|e| {
+                    io::Error::new(
+                        ErrorKind::Other,
+                        format!("Failed to create TLS configuration: {}", e),
+                    )
+                })?;
 
             cfg.alpn_protocols = vec![protocol.as_alpn().as_bytes().to_vec()];
             Arc::new(cfg)

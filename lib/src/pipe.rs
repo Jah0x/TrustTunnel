@@ -1,14 +1,13 @@
-use std::fmt::{Display, Formatter};
-use std::io;
-use std::io::ErrorKind;
-use std::time::Duration;
+use crate::{log_id, log_utils};
 use async_trait::async_trait;
 use bytes::Bytes;
 use future::Either;
 use futures::{future, FutureExt};
+use std::fmt::{Display, Formatter};
+use std::io;
+use std::io::ErrorKind;
+use std::time::Duration;
 use tokio::time::Instant;
-use crate::{log_id, log_utils};
-
 
 macro_rules! log_dir {
     ($lvl:ident, $id_chain:expr, $direction:expr, $msg:expr) => {
@@ -18,7 +17,6 @@ macro_rules! log_dir {
         log_id!($lvl, $id_chain, std::concat!("{} ", $fmt), $direction, $($arg)*)
     };
 }
-
 
 pub(crate) enum Data {
     /// Data chunk
@@ -106,7 +104,6 @@ pub(crate) enum ExchangeOnceStatus<T> {
     Finished(T),
 }
 
-
 impl Display for Data {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -143,7 +140,11 @@ impl<F: Fn(SimplexDirection, usize) + Send> SimplexPipe<F> {
     }
 
     /// Initiate data exchange until the `Source` is closed or some error happened
-    pub async fn exchange<T: Copy>(&mut self, id: T, timeout: Duration) -> Result<ExchangeOnceStatus<T>, Error<T>> {
+    pub async fn exchange<T: Copy>(
+        &mut self,
+        id: T,
+        timeout: Duration,
+    ) -> Result<ExchangeOnceStatus<T>, Error<T>> {
         loop {
             self.last_activity = Instant::now();
 
@@ -154,12 +155,20 @@ impl<F: Fn(SimplexDirection, usize) + Send> SimplexPipe<F> {
                     Ok(x)
                 } else {
                     self.sink.wait_writable().await?;
-                    let pending = self.pending_chunk.take()
-                        .ok_or_else(|| io::Error::new(ErrorKind::Other, "Pending chunk is unexpectedly absent"))?;
-                    log_dir!(trace, self.sink.id(), self.direction, "Sending unsent: {}", pending);
+                    let pending = self.pending_chunk.take().ok_or_else(|| {
+                        io::Error::new(ErrorKind::Other, "Pending chunk is unexpectedly absent")
+                    })?;
+                    log_dir!(
+                        trace,
+                        self.sink.id(),
+                        self.direction,
+                        "Sending unsent: {}",
+                        pending
+                    );
                     Ok(pending)
                 }
-            }.boxed();
+            }
+            .boxed();
 
             let data = match tokio::time::timeout(timeout, future).await {
                 Ok(x) => x.map_err(|e| io_to_pipe_error(id, e))?,
@@ -169,20 +178,32 @@ impl<F: Fn(SimplexDirection, usize) + Send> SimplexPipe<F> {
             match data {
                 Data::Chunk(bytes) => {
                     let data_len = bytes.len();
-                    let unsent_data = self.sink.write(bytes)
+                    let unsent_data = self
+                        .sink
+                        .write(bytes)
                         .map_err(|e| io_to_pipe_error(id, e))?;
                     let sent = data_len - unsent_data.len();
                     (self.update_metrics)(self.direction, sent);
-                    self.source.consume(sent)
+                    self.source
+                        .consume(sent)
                         .map_err(|e| io_to_pipe_error(id, e))?;
                     if !unsent_data.is_empty() {
-                        log_dir!(trace, self.source.id(), self.direction, "Unsent: {} bytes", unsent_data.len());
+                        log_dir!(
+                            trace,
+                            self.source.id(),
+                            self.direction,
+                            "Unsent: {} bytes",
+                            unsent_data.len()
+                        );
                         self.pending_chunk = Some(Data::Chunk(unsent_data));
                     }
                 }
                 Data::Eof => {
                     self.sink.eof().map_err(|e| io_to_pipe_error(id, e))?;
-                    break self.sink.flush().await
+                    break self
+                        .sink
+                        .flush()
+                        .await
                         .map(|()| ExchangeOnceStatus::Finished(id))
                         .map_err(|e| io_to_pipe_error(id, e));
                 }
@@ -227,7 +248,9 @@ impl<F: Fn(SimplexDirection, usize) + Send + Clone> DuplexPipe<F> {
     }
 
     async fn exchange_once(
-        &mut self, timeout: Duration, id: &log_utils::IdChain<u64>,
+        &mut self,
+        timeout: Duration,
+        id: &log_utils::IdChain<u64>,
     ) -> io::Result<ExchangeOnceStatus<()>> {
         let f1 = self.left_pipe.exchange(self.left_pipe.direction, timeout);
         futures::pin_mut!(f1);
@@ -240,8 +263,9 @@ impl<F: Fn(SimplexDirection, usize) + Send + Clone> DuplexPipe<F> {
                 log_dir!(trace, id, dir, "Pipe gracefully closed");
                 let ret = match another.await {
                     Ok(ExchangeOnceStatus::Finished(_)) => Ok(ExchangeOnceStatus::Finished(())),
-                    Ok(ExchangeOnceStatus::TimedOut(dir)) =>
-                        Err(io_to_pipe_error(dir, ErrorKind::TimedOut.into())),
+                    Ok(ExchangeOnceStatus::TimedOut(dir)) => {
+                        Err(io_to_pipe_error(dir, ErrorKind::TimedOut.into()))
+                    }
                     Err(e) => Err(e),
                 };
 
@@ -251,8 +275,9 @@ impl<F: Fn(SimplexDirection, usize) + Send + Clone> DuplexPipe<F> {
                 ret.map_err(|e| e.io)
             }
             Ok(Either::Left((ExchangeOnceStatus::TimedOut(_), _)))
-            | Ok(Either::Right((ExchangeOnceStatus::TimedOut(_), _))) =>
-                Ok(ExchangeOnceStatus::TimedOut(())),
+            | Ok(Either::Right((ExchangeOnceStatus::TimedOut(_), _))) => {
+                Ok(ExchangeOnceStatus::TimedOut(()))
+            }
             Err(Either::Left((e, _))) | Err(Either::Right((e, _))) => {
                 if e.io.kind() != ErrorKind::WouldBlock {
                     log_dir!(debug, id, e.id, "Error on pipe: {}", e.io);
@@ -262,7 +287,6 @@ impl<F: Fn(SimplexDirection, usize) + Send + Clone> DuplexPipe<F> {
         }
     }
 }
-
 
 fn io_to_pipe_error<T>(id: T, io: io::Error) -> Error<T> {
     Error { id, io }

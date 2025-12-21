@@ -1,11 +1,10 @@
+use crate::authentication::Authenticator;
+use crate::{authentication, log_utils};
+use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
+use base64::Engine;
+use serde::Deserialize;
 use std::borrow::Cow;
 use std::collections::HashSet;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
-use crate::{authentication, log_utils};
-use crate::authentication::Authenticator;
-use serde::Deserialize;
-
 
 /// A client descriptor
 #[derive(Deserialize)]
@@ -23,10 +22,10 @@ pub struct RegistryBasedAuthenticator {
 }
 
 impl RegistryBasedAuthenticator {
-    pub fn new(clients: &Vec<Client>) -> Self
-    {
+    pub fn new(clients: &Vec<Client>) -> Self {
         Self {
-            clients: clients.iter()
+            clients: clients
+                .iter()
                 .map(|x| BASE64_ENGINE.encode(format!("{}:{}", x.username, x.password)))
                 .map(Cow::Owned)
                 .collect(),
@@ -36,11 +35,14 @@ impl RegistryBasedAuthenticator {
 
 impl Authenticator for RegistryBasedAuthenticator {
     fn authenticate(
-        &self, source: &authentication::Source<'_>, _log_id: &log_utils::IdChain<u64>,
+        &self,
+        source: &authentication::Source<'_>,
+        _log_id: &log_utils::IdChain<u64>,
     ) -> authentication::Status {
         match &source {
-            authentication::Source::ProxyBasic(str) if self.clients.contains(str) =>
-                authentication::Status::Pass,
+            authentication::Source::ProxyBasic(str) if self.clients.contains(str) => {
+                authentication::Status::Pass
+            }
             _ => authentication::Status::Reject,
         }
     }

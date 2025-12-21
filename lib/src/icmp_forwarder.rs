@@ -1,24 +1,23 @@
-extern {
+extern "C" {
     fn set_icmp_filter(fd: libc::c_int) -> libc::c_int;
     fn set_icmpv6_filter(fd: libc::c_int) -> libc::c_int;
 }
 
-use std::net::{IpAddr, SocketAddr};
-use std::io;
-use std::collections::{BTreeMap, HashMap, LinkedList};
+use crate::settings::Settings;
+use crate::{datagram_pipe, downstream, forwarder, icmp_utils, log_utils, net_utils, utils};
+use async_trait::async_trait;
+use bytes::Bytes;
 use std::collections::btree_map::Entry;
+use std::collections::{BTreeMap, HashMap, LinkedList};
+use std::io;
 use std::io::ErrorKind;
+use std::net::{IpAddr, SocketAddr};
 use std::ops::Bound;
 use std::os::unix::io::AsRawFd;
 use std::sync::{Arc, Mutex};
-use async_trait::async_trait;
-use bytes::Bytes;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{mpsc, RwLock};
 use tokio::time::Instant;
-use crate::{datagram_pipe, downstream, forwarder, icmp_utils, log_utils, net_utils, utils};
-use crate::settings::Settings;
-
 
 pub(crate) struct IcmpForwarder {
     shared: Arc<ForwarderShared>,
@@ -67,9 +66,7 @@ struct IcmpSink {
 }
 
 impl IcmpForwarder {
-    pub fn new(
-        core_settings: Arc<Settings>,
-    ) -> Self {
+    pub fn new(core_settings: Arc<Settings>) -> Self {
         let deadline_waker = Arc::new(tokio::sync::Notify::new());
         Self {
             shared: Arc::new(ForwarderShared {
@@ -83,24 +80,26 @@ impl IcmpForwarder {
     }
 
     pub fn make_multiplexer(
-        &self, id: log_utils::IdChain<u64>
+        &self,
+        id: log_utils::IdChain<u64>,
     ) -> io::Result<(
         Box<dyn datagram_pipe::Source<Output = forwarder::IcmpDatagram>>,
         Box<dyn datagram_pipe::Sink<Input = downstream::IcmpDatagram>>,
     )> {
-        let (tx, rx) = mpsc::channel(self.shared.core_settings.icmp.as_ref().unwrap().recv_message_queue_capacity);
+        let (tx, rx) = mpsc::channel(
+            self.shared
+                .core_settings
+                .icmp
+                .as_ref()
+                .unwrap()
+                .recv_message_queue_capacity,
+        );
         let shared = Arc::new(PipeShared {
             forwarder_shared: self.shared.clone(),
         });
         Ok((
-            Box::new(IcmpSource {
-                rx,
-                id,
-            }),
-            Box::new(IcmpSink {
-                shared,
-                tx,
-            }),
+            Box::new(IcmpSource { rx, id }),
+            Box::new(IcmpSink { shared, tx }),
         ))
     }
 
@@ -129,8 +128,10 @@ impl IcmpForwarder {
             trace!("Received message: peer={} message={:?}", peer, &reply);
             let request = match reply.responded_echo_request() {
                 None => {
-                    debug!("Failed extracting echo request, dropping message: peer={}, message={:?}",
-                        peer, reply);
+                    debug!(
+                        "Failed extracting echo request, dropping message: peer={}, message={:?}",
+                        peer, reply
+                    );
                     continue;
                 }
                 Some(x) => x,
@@ -142,19 +143,21 @@ impl IcmpForwarder {
                     debug!("Reply waiter not found: peer={}, reply={:?}", peer, reply);
                     continue;
                 }
-                Some(ReplyWaiter { waker_tx, .. }) =>
-                    match waker_tx.try_send((peer, reply)) {
-                        Ok(_) => (),
-                        Err(mpsc::error::TrySendError::Closed((peer, message))) => {
-                            debug!("Listener closed: peer={} request={:?} reply={:?}", peer, request, message);
-                            listeners.reply_waiters.remove(&request);
-                        }
-                        Err(mpsc::error::TrySendError::Full((peer, message))) => {
-                            debug!("Dropping message due to queue overflow: peer={} request={:?} reply={:?}",
-                                peer, request, message);
-                            listeners.reply_waiters.remove(&request);
-                        }
+                Some(ReplyWaiter { waker_tx, .. }) => match waker_tx.try_send((peer, reply)) {
+                    Ok(_) => (),
+                    Err(mpsc::error::TrySendError::Closed((peer, message))) => {
+                        debug!(
+                            "Listener closed: peer={} request={:?} reply={:?}",
+                            peer, request, message
+                        );
+                        listeners.reply_waiters.remove(&request);
                     }
+                    Err(mpsc::error::TrySendError::Full((peer, message))) => {
+                        debug!("Dropping message due to queue overflow: peer={} request={:?} reply={:?}",
+                                peer, request, message);
+                        listeners.reply_waiters.remove(&request);
+                    }
+                },
             }
         }
     }
@@ -163,13 +166,25 @@ impl IcmpForwarder {
         let mut sockets = self.shared.sockets.write().await;
         sockets.v4 = Some(RawPacketStream::new(
             libc::IPPROTO_ICMP,
-            &self.shared.core_settings.icmp.as_ref().unwrap().interface_name,
+            &self
+                .shared
+                .core_settings
+                .icmp
+                .as_ref()
+                .unwrap()
+                .interface_name,
         )?);
 
         sockets.v6 = if self.shared.core_settings.ipv6_available {
             Some(RawPacketStream::new(
                 libc::IPPROTO_ICMPV6,
-                &self.shared.core_settings.icmp.as_ref().unwrap().interface_name,
+                &self
+                    .shared
+                    .core_settings
+                    .icmp
+                    .as_ref()
+                    .unwrap()
+                    .interface_name,
             )?)
         } else {
             None
@@ -180,8 +195,15 @@ impl IcmpForwarder {
 
     async fn maintain_listeners(&self) -> io::Result<()> {
         loop {
-            let closest_deadline = self.shared.listeners.lock().unwrap()
-                .deadlines.keys().next().cloned();
+            let closest_deadline = self
+                .shared
+                .listeners
+                .lock()
+                .unwrap()
+                .deadlines
+                .keys()
+                .next()
+                .cloned();
             match closest_deadline {
                 None => self.deadline_waker_rx.notified().await,
                 Some(x) => tokio::time::sleep_until(x).await,
@@ -189,14 +211,19 @@ impl IcmpForwarder {
 
             let mut listeners = self.shared.listeners.lock().unwrap();
             let now = Instant::now();
-            let expired: Vec<_> = listeners.deadlines.range((Bound::Unbounded, Bound::Included(now)))
+            let expired: Vec<_> = listeners
+                .deadlines
+                .range((Bound::Unbounded, Bound::Included(now)))
                 .map(|(k, _)| *k)
                 .collect();
             for deadline in expired {
                 if let Some(requests) = listeners.deadlines.remove(&deadline) {
                     for request in requests {
                         if let Some(waiter) = listeners.reply_waiters.remove(&request) {
-                            debug!("Request expired: peer={} request={:?}", waiter.original_peer, request);
+                            debug!(
+                                "Request expired: peer={} request={:?}",
+                                waiter.original_peer, request
+                            );
                         }
                     }
                 }
@@ -206,15 +233,17 @@ impl IcmpForwarder {
 
     async fn listen_v4(&self) -> io::Result<(IpAddr, icmp_utils::Message)> {
         loop {
-            let (peer, packet) = Self::listen_socket(
-                self.shared.sockets.read().await
-                    .v4.as_ref().unwrap()
-            ).await?;
+            let (peer, packet) =
+                Self::listen_socket(self.shared.sockets.read().await.v4.as_ref().unwrap()).await?;
 
             match icmp_utils::v4::Message::deserialize(packet.clone()) {
                 Ok(x) => break Ok((peer, icmp_utils::Message::from(x))),
                 Err(e) => {
-                    debug!("Dropping malformed ICMPv4 message: {:?}, {}", e, utils::hex_dump(&packet));
+                    debug!(
+                        "Dropping malformed ICMPv4 message: {:?}, {}",
+                        e,
+                        utils::hex_dump(&packet)
+                    );
                     continue;
                 }
             }
@@ -241,20 +270,27 @@ impl IcmpForwarder {
     async fn listen_socket(sock: &RawPacketStream) -> io::Result<(IpAddr, Bytes)> {
         loop {
             let mut guard = sock.inner.readable().await?;
-            let (peer, packet) =
-                match guard.try_io(|x| net_utils::recv_from(x.as_raw_fd(), None)) {
-                    Ok(x) => x?,
-                    Err(_would_block) => continue,
-                };
-            trace!("Received ICMP: peer={} bytes={:?}", peer, utils::hex_dump(&packet));
+            let (peer, packet) = match guard.try_io(|x| net_utils::recv_from(x.as_raw_fd(), None)) {
+                Ok(x) => x?,
+                Err(_would_block) => continue,
+            };
+            trace!(
+                "Received ICMP: peer={} bytes={:?}",
+                peer,
+                utils::hex_dump(&packet)
+            );
 
             if peer.is_ipv4() {
                 match net_utils::skip_ipv4_header(packet) {
                     None => debug!("Dropping ICMPv4 packet with invalid IP header"),
-                    Some((proto, payload)) if proto == libc::IPPROTO_ICMP => return Ok((peer, payload)),
-                    Some((proto, payload)) =>
-                        debug!("Dropping non-ICMP packet: proto={}, payload={}",
-                            proto, utils::hex_dump(&payload)),
+                    Some((proto, payload)) if proto == libc::IPPROTO_ICMP => {
+                        return Ok((peer, payload))
+                    }
+                    Some((proto, payload)) => debug!(
+                        "Dropping non-ICMP packet: proto={}, payload={}",
+                        proto,
+                        utils::hex_dump(&payload)
+                    ),
                 }
             } else {
                 return Ok((peer, packet));
@@ -272,13 +308,14 @@ impl datagram_pipe::Source for IcmpSource {
     }
 
     async fn read(&mut self) -> io::Result<forwarder::IcmpDatagram> {
-        let (peer, message) = self.rx.recv().await
+        let (peer, message) = self
+            .rx
+            .recv()
+            .await
             .ok_or_else(|| io::Error::from(ErrorKind::UnexpectedEof))?;
 
         Ok(forwarder::IcmpDatagram {
-            meta: forwarder::IcmpDatagramMeta {
-                peer,
-            },
+            meta: forwarder::IcmpDatagramMeta { peer },
             message,
         })
     }
@@ -288,7 +325,10 @@ impl datagram_pipe::Source for IcmpSource {
 impl datagram_pipe::Sink for IcmpSink {
     type Input = downstream::IcmpDatagram;
 
-    async fn write(&mut self, datagram: downstream::IcmpDatagram) -> io::Result<datagram_pipe::SendStatus> {
+    async fn write(
+        &mut self,
+        datagram: downstream::IcmpDatagram,
+    ) -> io::Result<datagram_pipe::SendStatus> {
         let echo = match datagram.message.to_echo() {
             None => {
                 debug!("Only echo request messages can be sent to peer");
@@ -313,16 +353,24 @@ impl datagram_pipe::Sink for IcmpSink {
         };
 
         let serialized = datagram.message.serialize();
-        socket.send_to(datagram.meta.peer, datagram.ttl, &serialized).await?;
+        socket
+            .send_to(datagram.meta.peer, datagram.ttl, &serialized)
+            .await?;
 
-        let deadline = Instant::now() + forwarder_shared.core_settings.icmp.as_ref().unwrap().request_timeout;
+        let deadline = Instant::now()
+            + forwarder_shared
+                .core_settings
+                .icmp
+                .as_ref()
+                .unwrap()
+                .request_timeout;
         let mut listeners = forwarder_shared.listeners.lock().unwrap();
         listeners.reply_waiters.insert(
             echo.clone(),
             ReplyWaiter {
                 original_peer: datagram.meta.peer,
                 waker_tx: self.tx.clone(),
-            }
+            },
         );
 
         match listeners.deadlines.entry(deadline) {
@@ -347,12 +395,11 @@ struct RawPacketStream {
 
 impl RawPacketStream {
     pub fn new(protocol: libc::c_int, if_name: &str) -> io::Result<Self> {
-        let family =
-            match protocol {
-                libc::IPPROTO_ICMP => libc::AF_INET,
-                libc::IPPROTO_ICMPV6 => libc::AF_INET6,
-                _ => unreachable!(),
-            };
+        let family = match protocol {
+            libc::IPPROTO_ICMP => libc::AF_INET,
+            libc::IPPROTO_ICMPV6 => libc::AF_INET6,
+            _ => unreachable!(),
+        };
 
         unsafe {
             #[cfg(target_os = "linux")]
@@ -374,12 +421,12 @@ impl RawPacketStream {
                 return Err(io::Error::last_os_error());
             }
 
-            let socket = AsyncFd::new(fd)
-                .map_err(|e| { libc::close(fd); e })?;
+            let socket = AsyncFd::new(fd).map_err(|e| {
+                libc::close(fd);
+                e
+            })?;
 
-            Ok(Self {
-                inner: socket,
-            })
+            Ok(Self { inner: socket })
         }
     }
 

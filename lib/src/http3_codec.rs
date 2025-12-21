@@ -1,16 +1,15 @@
+use crate::http_codec::{HttpCodec, RequestHeaders, ResponseHeaders};
+use crate::quic_multiplexer::{QuicSocket, QuicSocketEvent};
+use crate::tls_demultiplexer::Protocol;
+use crate::{datagram_pipe, http_codec, log_id, log_utils, net_utils, pipe};
+use async_trait::async_trait;
+use bytes::Bytes;
 use std::collections::HashMap;
 use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
 use std::sync::Arc;
-use async_trait::async_trait;
-use bytes::Bytes;
 use tokio::sync::mpsc;
-use crate::{datagram_pipe, http_codec, log_id, log_utils, net_utils, pipe};
-use crate::tls_demultiplexer::Protocol;
-use crate::http_codec::{HttpCodec, RequestHeaders, ResponseHeaders};
-use crate::quic_multiplexer::{QuicSocket, QuicSocketEvent};
-
 
 pub(crate) struct Http3Codec {
     socket: Arc<QuicSocket>,
@@ -68,10 +67,7 @@ struct StreamSink {
 }
 
 impl Http3Codec {
-    pub fn new(
-        socket: QuicSocket,
-        parent_id_chain: log_utils::IdChain<u64>,
-    ) -> Self {
+    pub fn new(socket: QuicSocket, parent_id_chain: log_utils::IdChain<u64>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         Self {
@@ -89,12 +85,20 @@ impl Http3Codec {
                 self.socket.notify_stream_waiting_writable(stream_id);
                 Ok(())
             }
-            StreamMessage::Shutdown(stream_id, direction) => self.on_stream_shutdown(stream_id, direction),
+            StreamMessage::Shutdown(stream_id, direction) => {
+                self.on_stream_shutdown(stream_id, direction)
+            }
         }
     }
 
-    fn on_stream_shutdown(&mut self, stream_id: u64, direction: Option<quiche::Shutdown>) -> io::Result<()> {
-        let stream = self.streams.get_mut(&stream_id)
+    fn on_stream_shutdown(
+        &mut self,
+        stream_id: u64,
+        direction: Option<quiche::Shutdown>,
+    ) -> io::Result<()> {
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
             .ok_or_else(|| io::Error::from(ErrorKind::NotFound))?;
 
         let (close_read, close_write) = match direction {
@@ -104,11 +108,13 @@ impl Http3Codec {
         };
 
         if close_read && !stream.read_shutdown {
-            self.socket.shutdown_stream(stream_id, quiche::Shutdown::Read);
+            self.socket
+                .shutdown_stream(stream_id, quiche::Shutdown::Read);
             stream.read_shutdown = true;
         }
         if close_write && !stream.write_shutdown {
-            self.socket.shutdown_stream(stream_id, quiche::Shutdown::Write);
+            self.socket
+                .shutdown_stream(stream_id, quiche::Shutdown::Write);
             stream.write_shutdown = true;
         }
 
@@ -119,11 +125,17 @@ impl Http3Codec {
         Ok(())
     }
 
-    fn on_socket_event(&mut self, event: QuicSocketEvent) -> io::Result<Option<Box<dyn http_codec::Stream>>> {
+    fn on_socket_event(
+        &mut self,
+        event: QuicSocketEvent,
+    ) -> io::Result<Option<Box<dyn http_codec::Stream>>> {
         match event {
-            QuicSocketEvent::Request(stream_id, request) =>
-                self.on_request(stream_id, *request).map(Some),
-            QuicSocketEvent::Readable(stream_id) => self.on_stream_readable(stream_id).map(|_| None),
+            QuicSocketEvent::Request(stream_id, request) => {
+                self.on_request(stream_id, *request).map(Some)
+            }
+            QuicSocketEvent::Readable(stream_id) => {
+                self.on_stream_readable(stream_id).map(|_| None)
+            }
             QuicSocketEvent::Writable(streams) => {
                 self.notify_writable_streams(streams);
                 Ok(None)
@@ -135,20 +147,28 @@ impl Http3Codec {
         }
     }
 
-    fn on_request(&mut self, stream_id: u64, request: RequestHeaders) -> io::Result<Box<dyn http_codec::Stream>> {
+    fn on_request(
+        &mut self,
+        stream_id: u64,
+        request: RequestHeaders,
+    ) -> io::Result<Box<dyn http_codec::Stream>> {
         let (readable_tx, readable_rx) = mpsc::channel(1);
         let (writable_tx, writable_rx) = mpsc::channel(1);
 
         let id = self.parent_id_chain.extended(log_utils::IdItem::new(
-            log_utils::CONNECTION_ID_FMT, stream_id,
+            log_utils::CONNECTION_ID_FMT,
+            stream_id,
         ));
 
-        self.streams.insert(stream_id, Stream {
-            readable_event_tx: readable_tx,
-            writable_event_tx: writable_tx,
-            read_shutdown: false,
-            write_shutdown: false,
-        });
+        self.streams.insert(
+            stream_id,
+            Stream {
+                readable_event_tx: readable_tx,
+                writable_event_tx: writable_tx,
+                read_shutdown: false,
+                write_shutdown: false,
+            },
+        );
 
         Ok(Box::new(DetachedStream {
             source: StreamSource {
@@ -171,7 +191,9 @@ impl Http3Codec {
     }
 
     fn on_stream_readable(&mut self, stream_id: u64) -> io::Result<()> {
-        let stream = self.streams.get_mut(&stream_id)
+        let stream = self
+            .streams
+            .get_mut(&stream_id)
             .ok_or_else(|| io::Error::from(ErrorKind::NotFound))?;
 
         match stream.readable_event_tx.try_send(()) {
@@ -179,14 +201,17 @@ impl Http3Codec {
             // multiple `readable` messages in the queue
             Ok(_) | Err(mpsc::error::TrySendError::Full(_)) => Ok(()),
             Err(e) => Err(io::Error::new(
-                ErrorKind::Other, format!("Failed to send stream readable event: {}", e),
+                ErrorKind::Other,
+                format!("Failed to send stream readable event: {}", e),
             )),
         }
     }
 
     fn notify_writable_streams(&self, streams: Vec<u64>) {
         for stream_id in streams {
-            let r = match self.streams.get(&stream_id)
+            let r = match self
+                .streams
+                .get(&stream_id)
                 .ok_or_else(|| io::Error::from(ErrorKind::NotFound))
                 .and_then(|s| Ok((self.socket.stream_capacity(stream_id)?, s)))
             {
@@ -206,13 +231,17 @@ impl Http3Codec {
             };
 
             if let Err(e) = r {
-                log_id!(debug, self.parent_id_chain, "Failed to send stream writable event: stream id={} error={}",
-                    stream_id, e);
+                log_id!(
+                    debug,
+                    self.parent_id_chain,
+                    "Failed to send stream writable event: stream id={} error={}",
+                    stream_id,
+                    e
+                );
             }
         }
     }
 }
-
 
 #[async_trait]
 impl HttpCodec for Http3Codec {
@@ -250,15 +279,20 @@ impl HttpCodec for Http3Codec {
                 Some(FiredEvent::Stream(message)) => {
                     let stream_id = message.stream_id();
                     if let Err(e) = self.on_stream_message(message) {
-                        log_id!(debug, self.parent_id_chain, "Failed to process stream message: id={}, error={}",
-                            stream_id, e);
+                        log_id!(
+                            debug,
+                            self.parent_id_chain,
+                            "Failed to process stream message: id={}, error={}",
+                            stream_id,
+                            e
+                        );
                         let _ = self.on_stream_shutdown(stream_id, None);
                     }
                 }
                 Some(FiredEvent::Socket(event)) => match self.on_socket_event(event)? {
                     None => (),
                     Some(stream) => return Ok(Some(stream)),
-                }
+                },
             }
         }
     }
@@ -281,7 +315,6 @@ impl StreamMessage {
     }
 }
 
-
 impl http_codec::Stream for DetachedStream {
     fn id(&self) -> log_utils::IdChain<u64> {
         self.source.id.clone()
@@ -291,7 +324,12 @@ impl http_codec::Stream for DetachedStream {
         &self.source
     }
 
-    fn split(self: Box<Self>) -> (Box<dyn http_codec::PendingRequest>, Box<dyn http_codec::PendingRespond>) {
+    fn split(
+        self: Box<Self>,
+    ) -> (
+        Box<dyn http_codec::PendingRequest>,
+        Box<dyn http_codec::PendingRespond>,
+    ) {
         (Box::new(self.source), Box::new(self.sink))
     }
 }
@@ -324,12 +362,14 @@ impl pipe::Source for StreamSource {
         loop {
             match self.socket.read(self.stream_id)? {
                 Some(chunk) => return Ok(pipe::Data::Chunk(chunk)),
-                None => if self.socket.stream_finished(self.stream_id) {
-                    return Ok(pipe::Data::Eof);
-                } else {
-                    match self.readable_event_rx.recv().await {
-                        None => return Err(io::Error::from(ErrorKind::UnexpectedEof)),
-                        Some(_) => continue,
+                None => {
+                    if self.socket.stream_finished(self.stream_id) {
+                        return Ok(pipe::Data::Eof);
+                    } else {
+                        match self.readable_event_rx.recv().await {
+                            None => return Err(io::Error::from(ErrorKind::UnexpectedEof)),
+                            Some(_) => continue,
+                        }
                     }
                 }
             }
@@ -345,7 +385,8 @@ impl pipe::Source for StreamSource {
 impl Drop for StreamSource {
     fn drop(&mut self) {
         match self.codec_tx.send(StreamMessage::Shutdown(
-            self.stream_id, Some(quiche::Shutdown::Read),
+            self.stream_id,
+            Some(quiche::Shutdown::Read),
         )) {
             Ok(_) => (),
             Err(e) => log_id!(debug, self.id, "Failed to notify of read shutdown: {}", e),
@@ -358,18 +399,30 @@ impl http_codec::PendingRespond for StreamSink {
         self.id.clone()
     }
 
-    fn send_response(self: Box<Self>, response: ResponseHeaders, eof: bool)
-                     -> io::Result<Box<dyn http_codec::RespondedStreamSink>>
-    {
-        log_id!(debug, self.id, "Sending response: {:?} (eof={})", response, eof);
+    fn send_response(
+        self: Box<Self>,
+        response: ResponseHeaders,
+        eof: bool,
+    ) -> io::Result<Box<dyn http_codec::RespondedStreamSink>> {
+        log_id!(
+            debug,
+            self.id,
+            "Sending response: {:?} (eof={})",
+            response,
+            eof
+        );
 
         self.socket.send_response(self.stream_id, response, false)?;
 
         if eof {
-            self.codec_tx.send(StreamMessage::Shutdown(self.stream_id, None))
-                .map_err(|e| io::Error::new(
-                    ErrorKind::Other, format!("Failed to send shutdown message: {}", e),
-                ))?;
+            self.codec_tx
+                .send(StreamMessage::Shutdown(self.stream_id, None))
+                .map_err(|e| {
+                    io::Error::new(
+                        ErrorKind::Other,
+                        format!("Failed to send shutdown message: {}", e),
+                    )
+                })?;
         }
 
         Ok(self)
@@ -411,7 +464,8 @@ impl pipe::Sink for StreamSink {
     }
 
     fn eof(&mut self) -> io::Result<()> {
-        self.socket.shutdown_stream(self.stream_id, quiche::Shutdown::Write);
+        self.socket
+            .shutdown_stream(self.stream_id, quiche::Shutdown::Write);
         Ok(())
     }
 
@@ -420,16 +474,15 @@ impl pipe::Sink for StreamSink {
             match self.socket.stream_capacity(self.stream_id) {
                 Ok(n) if n > self.data_frame_overhead => return Ok(()),
                 Ok(_) => {
-                    self.codec_tx.send(StreamMessage::WaitingWritable(self.stream_id))
+                    self.codec_tx
+                        .send(StreamMessage::WaitingWritable(self.stream_id))
                         .map_err(|_| io::Error::from(ErrorKind::UnexpectedEof))?;
                     match self.writable_event_rx.recv().await {
                         None => return Err(io::Error::from(ErrorKind::UnexpectedEof)),
                         Some(_) => continue,
                     }
                 }
-                Err(e) => return Err(io::Error::new(
-                    ErrorKind::Other, e.to_string(),
-                )),
+                Err(e) => return Err(io::Error::new(ErrorKind::Other, e.to_string())),
             }
         }
     }
@@ -446,7 +499,8 @@ impl http_codec::DroppingSink for StreamSink {
         let unsent = self.socket.write(self.stream_id, data)?;
         if !unsent.is_empty() {
             return Err(io::Error::new(
-                ErrorKind::Other, "Packet was sent partially while should've been sent entirely",
+                ErrorKind::Other,
+                "Packet was sent partially while should've been sent entirely",
             ));
         }
         Ok(datagram_pipe::SendStatus::Sent)
@@ -456,7 +510,8 @@ impl http_codec::DroppingSink for StreamSink {
 impl Drop for StreamSink {
     fn drop(&mut self) {
         match self.codec_tx.send(StreamMessage::Shutdown(
-            self.stream_id, Some(quiche::Shutdown::Write),
+            self.stream_id,
+            Some(quiche::Shutdown::Write),
         )) {
             Ok(_) => (),
             Err(e) => log_id!(debug, self.id, "Failed to notify of write shutdown: {}", e),

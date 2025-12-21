@@ -1,23 +1,20 @@
+use crate::forwarder::Forwarder;
+use crate::tcp_forwarder::TcpForwarder;
+use crate::{
+    authentication, core, datagram_pipe, downstream, forwarder, log_utils, tunnel, udp_forwarder,
+};
+use async_trait::async_trait;
 use std::io;
 use std::net::IpAddr;
 use std::sync::Arc;
-use async_trait::async_trait;
-use crate::{authentication, core, datagram_pipe, downstream, forwarder, log_utils, tunnel, udp_forwarder};
-use crate::forwarder::Forwarder;
-use crate::tcp_forwarder::TcpForwarder;
-
 
 pub(crate) struct DirectForwarder {
     context: Arc<core::Context>,
 }
 
 impl DirectForwarder {
-    pub fn new(
-        context: Arc<core::Context>,
-    ) -> Self {
-        Self {
-            context,
-        }
+    pub fn new(context: Arc<core::Context>) -> Self {
+        Self { context }
     }
 }
 
@@ -58,12 +55,17 @@ impl Forwarder for DirectForwarder {
     }
 
     fn make_icmp_datagram_multiplexer(
-        &self, id: log_utils::IdChain<u64>
-    ) -> io::Result<Option<(
-        Box<dyn datagram_pipe::Source<Output = forwarder::IcmpDatagram>>,
-        Box<dyn datagram_pipe::Sink<Input = downstream::IcmpDatagram>>,
-    )>> {
-        self.context.icmp_forwarder.as_ref()
+        &self,
+        id: log_utils::IdChain<u64>,
+    ) -> io::Result<
+        Option<(
+            Box<dyn datagram_pipe::Source<Output = forwarder::IcmpDatagram>>,
+            Box<dyn datagram_pipe::Sink<Input = downstream::IcmpDatagram>>,
+        )>,
+    > {
+        self.context
+            .icmp_forwarder
+            .as_ref()
             .map(|x| x.make_multiplexer(id))
             .transpose()
     }

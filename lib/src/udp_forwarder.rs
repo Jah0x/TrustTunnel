@@ -1,17 +1,16 @@
-use std::collections::{HashMap, LinkedList};
+use crate::{datagram_pipe, downstream, forwarder, log_id, log_utils, net_utils};
+use async_trait::async_trait;
+use bytes::Bytes;
 use std::collections::hash_map::Entry;
+use std::collections::{HashMap, LinkedList};
 use std::io;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use async_trait::async_trait;
-use bytes::Bytes;
 use tokio::net::UdpSocket;
 use tokio::sync;
-use crate::{datagram_pipe, downstream, forwarder, log_id, log_utils, net_utils};
-
 
 struct Connection {
     socket: Arc<UdpSocket>,
@@ -46,9 +45,8 @@ enum PollStatus {
     SocketError(SocketError),
 }
 
-
 pub(crate) fn make_multiplexer(
-    id: log_utils::IdChain<u64>
+    id: log_utils::IdChain<u64>,
 ) -> io::Result<(
     Arc<dyn forwarder::UdpDatagramPipeShared>,
     Box<dyn datagram_pipe::Source<Output = forwarder::UdpDatagramReadStatus>>,
@@ -67,39 +65,55 @@ pub(crate) fn make_multiplexer(
             pending_closures: Default::default(),
             parent_id_chain: id,
         }),
-        Box::new(MultiplexerSink {
-            shared,
-            wake_tx,
-        }),
+        Box::new(MultiplexerSink { shared, wake_tx }),
     ))
 }
 
 async fn listen_socket_read(
-    meta: forwarder::UdpDatagramMeta, socket: Arc<UdpSocket>
+    meta: forwarder::UdpDatagramMeta,
+    socket: Arc<UdpSocket>,
 ) -> Result<forwarder::UdpDatagramMeta, SocketError> {
-    socket.readable().await
+    socket
+        .readable()
+        .await
         .map(|_| meta)
         .map_err(|io| SocketError { meta, io })
 }
 
 impl MultiplexerSource {
     fn on_socket_error(&mut self, meta: &forwarder::UdpDatagramMeta, error: io::Error) {
-        if self.shared.connections.lock().unwrap().remove(meta).is_some() {
+        if self
+            .shared
+            .connections
+            .lock()
+            .unwrap()
+            .remove(meta)
+            .is_some()
+        {
             self.pending_closures.push_back((*meta, error));
         }
     }
 
-    fn read_pending_socket(&mut self, meta: &forwarder::UdpDatagramMeta) -> Option<forwarder::UdpDatagramReadStatus> {
-        let socket = self.shared.connections.lock().unwrap()
+    fn read_pending_socket(
+        &mut self,
+        meta: &forwarder::UdpDatagramMeta,
+    ) -> Option<forwarder::UdpDatagramReadStatus> {
+        let socket = self
+            .shared
+            .connections
+            .lock()
+            .unwrap()
             .get(meta)
             .map(|conn| conn.socket.clone())?;
 
         let mut buffer = Vec::with_capacity(net_utils::MAX_UDP_PAYLOAD_SIZE);
         match socket.try_recv_buf(&mut buffer) {
-            Ok(_) => Some(forwarder::UdpDatagramReadStatus::Read(forwarder::UdpDatagram {
-                meta: meta.reversed(),
-                payload: Bytes::from(buffer),
-            })),
+            Ok(_) => Some(forwarder::UdpDatagramReadStatus::Read(
+                forwarder::UdpDatagram {
+                    meta: meta.reversed(),
+                    payload: Bytes::from(buffer),
+                },
+            )),
             Err(e) if e.kind() == ErrorKind::WouldBlock => None,
             Err(e) => {
                 self.on_socket_error(meta, e);
@@ -112,7 +126,7 @@ impl MultiplexerSource {
         let futures = {
             type Future = Box<
                 dyn futures::Future<Output = Result<forwarder::UdpDatagramMeta, SocketError>>
-                + Send
+                    + Send,
             >;
 
             let connections = self.shared.connections.lock().unwrap();
@@ -154,7 +168,12 @@ impl MultiplexerSource {
 #[async_trait]
 impl forwarder::UdpDatagramPipeShared for MultiplexerShared {
     async fn on_new_udp_connection(&self, meta: &downstream::UdpDatagramMeta) -> io::Result<()> {
-        match self.connections.lock().unwrap().entry(forwarder::UdpDatagramMeta::from(meta)) {
+        match self
+            .connections
+            .lock()
+            .unwrap()
+            .entry(forwarder::UdpDatagramMeta::from(meta))
+        {
             Entry::Occupied(_) => Err(io::Error::new(ErrorKind::Other, "Already present")),
             Entry::Vacant(e) => {
                 e.insert(Connection {
@@ -187,12 +206,14 @@ impl datagram_pipe::Source for MultiplexerSource {
 
             match self.poll_events().await? {
                 None => (),
-                Some(PollStatus::PendingRead(meta)) =>
+                Some(PollStatus::PendingRead(meta)) => {
                     if let Some(x) = self.read_pending_socket(&meta) {
                         return Ok(x);
                     }
-                Some(PollStatus::SocketError(SocketError { meta, io })) =>
-                    self.on_socket_error(&meta, io),
+                }
+                Some(PollStatus::SocketError(SocketError { meta, io })) => {
+                    self.on_socket_error(&meta, io)
+                }
             }
         }
     }
@@ -202,9 +223,16 @@ impl datagram_pipe::Source for MultiplexerSource {
 impl datagram_pipe::Sink for MultiplexerSink {
     type Input = downstream::UdpDatagram;
 
-    async fn write(&mut self, datagram: downstream::UdpDatagram) -> io::Result<datagram_pipe::SendStatus> {
+    async fn write(
+        &mut self,
+        datagram: downstream::UdpDatagram,
+    ) -> io::Result<datagram_pipe::SendStatus> {
         let meta = forwarder::UdpDatagramMeta::from(&datagram.meta);
-        let socket = self.shared.connections.lock().unwrap()
+        let socket = self
+            .shared
+            .connections
+            .lock()
+            .unwrap()
             .get(&meta)
             .map(|c| c.socket.clone())
             .ok_or_else(|| io::Error::from(ErrorKind::NotFound))?;
@@ -217,9 +245,12 @@ impl datagram_pipe::Sink for MultiplexerSink {
                     Ok(_) | Err(sync::mpsc::error::TrySendError::Full(_)) => {
                         conn.being_listened = true;
                     }
-                    Err(e) => return Err(io::Error::new(
-                        ErrorKind::Other, format!("Failed to wake up UDP listener task: {}", e)
-                    )),
+                    Err(e) => {
+                        return Err(io::Error::new(
+                            ErrorKind::Other,
+                            format!("Failed to wake up UDP listener task: {}", e),
+                        ))
+                    }
                 }
             }
         }

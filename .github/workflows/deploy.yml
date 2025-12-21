@@ -27,7 +27,7 @@ jobs:
           PREV_TAG=$(git describe --tags --abbrev=0 ${LAST_TAG}^)
           EOF=$(dd if=/dev/urandom bs=15 count=1 status=none | base64)
           echo "CHANGELOG<<$EOF" >> "$GITHUB_ENV"
-          ./scripts/extract_changelog.py "$PREV_TAG" "$LAST_TAG" >> "$GITHUB_ENV"
+          ./scripts/ci/extract_changelog.py "$PREV_TAG" "$LAST_TAG" >> "$GITHUB_ENV"
           echo "$EOF" >> "$GITHUB_ENV"
 
       - name: Release

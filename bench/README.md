@@ -2,16 +2,17 @@
 
 The benchmark consists of 3 isolated parts:
 
-* `remote-side` - acts as HTTP and iperf servers for the benchmark
-* `middle-box` - acts as a VPN endpoint host, either WireGuard or TrustTunnel
-* `local-side` - acts as a benchmark running host, can establish tunnels to the server
+- `remote-side` - acts as HTTP and iperf servers for the benchmark
+- `middle-box` - acts as a VPN endpoint host, either WireGuard or TrustTunnel
+- `local-side` - acts as a benchmark running host, can establish tunnels to the server
   residing on the remote side through the VPN endpoint
 
-# How to run
+## How to run
 
-## Single host
+### Single host
 
 1) Build docker images
+
    ```shell
    cd ./bench
    ./single_host.sh build --client=<TrustTunnelClient.git> --endpoint=<TrustTunnel.git>
@@ -19,21 +20,25 @@ The benchmark consists of 3 isolated parts:
 
    This command prepares all the parts to run on the current host. To see the full set of
    the available options run:
+
    ```shell
    ./single_host.sh --help
    ```
+
 2) Run the benchmark
+
    ```shell
    ./single_host.sh run
    ```
 
    This command runs all the parts of the benchmark on the current host.
 
-## Separate hosts
+### Separate hosts
 
 Assume IP addresses of `host_1`, `host_2` and `host_3` are 1.1.1.1, 2.2.2.2 and 3.3.3.3 respectively.
 
 1) Running `host_1` as a remote side
+
    ```shell
    scp Dockerfile user@1.1.1.1:~
    scp -r remote-side user@1.1.1.1:~
@@ -42,7 +47,9 @@ Assume IP addresses of `host_1`, `host_2` and `host_3` are 1.1.1.1, 2.2.2.2 and 
    docker build -t bench-rs ./remote-side
    docker run -d -p 8080:8080 -p 5201:5201 -p 5201:5201/udp bench-rs
    ```
+
 2) Running `host_2` as a middle box
+
    ```shell
    scp Dockerfile user@2.2.2.2:~
    git clone <TrustTunnel.git> ./middle-box/trusttunnel-rust/trusttunnel-endpoint
@@ -51,7 +58,8 @@ Assume IP addresses of `host_1`, `host_2` and `host_3` are 1.1.1.1, 2.2.2.2 and 
    docker build -t bench-common .
    ```
 
-    * WireGuard
+    - WireGuard
+
        ```shell
        docker build -t bench-mb-wg ./middle-box/wireguard
        docker run -d \
@@ -59,7 +67,9 @@ Assume IP addresses of `host_1`, `host_2` and `host_3` are 1.1.1.1, 2.2.2.2 and 
          -p 51820:51820/udp \
          bench-mb-wg
        ```
-    * TrustTunnel
+
+    - TrustTunnel
+
        ```shell
        docker build \
          --build-arg ENDPOINT_HOSTNAME=endpoint.bench \
@@ -69,7 +79,9 @@ Assume IP addresses of `host_1`, `host_2` and `host_3` are 1.1.1.1, 2.2.2.2 and 
          -p 4433:4433 -p 4433:4433/udp \
          bench-mb-ag
        ```
+
 3) Run the benchmark from `host_3`
+
    ```shell
    scp Dockerfile user@3.3.3.3:~
    git clone <TrustTunnel.git> ./local-side/trusttunnel/trusttunnel-endpoint
@@ -79,17 +91,22 @@ Assume IP addresses of `host_1`, `host_2` and `host_3` are 1.1.1.1, 2.2.2.2 and 
    docker build -t bench-ls ./local-side
    ```
 
-   * No VPN
+   - No VPN
+
       ```shell
       ./local-side/bench.sh no-vpn bridge 1.1.1.1 results/no-vpn
       ```
-   * WireGuard
+
+   - WireGuard
+
       ```shell
       docker build -t bench-ls-wg ./local-side/wireguard
       ./local-side/bench.sh wg bridge 1.1.1.1 results/wg 2.2.2.2
       ```
-   * TrustTunnel
+
+   - TrustTunnel
+
       ```shell
       docker build -t bench-ls-ag ./local-side/trusttunnel
-      ./local-side/bench.sh ag bridge 1.1.1.1 results/ag 2.2.2.2 endpoint.bench 
+      ./local-side/bench.sh ag bridge 1.1.1.1 results/ag 2.2.2.2 endpoint.bench
       ```

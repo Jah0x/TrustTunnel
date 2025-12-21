@@ -12,11 +12,9 @@
 //! | 2 bytes  |  16 bytes           | 2 bytes         | 1 byte        | 2 bytes   |
 //! +----------+---------------------+-----------------+---------------+-----------+
 
-
+use crate::{downstream, forwarder, http_datagram_codec, icmp_utils, net_utils};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use ring::rand::SecureRandom;
-use crate::{downstream, forwarder, http_datagram_codec, icmp_utils, net_utils};
-
 
 const ICMPPKT_ID_SIZE: usize = 2;
 const ICMPPKT_ADDR_SIZE: usize = 16;
@@ -25,20 +23,20 @@ const ICMPPKT_TTL_SIZE: usize = 1;
 const ICMPPKT_DATA_SIZE: usize = 2;
 const ICMPPKT_TYPE_SIZE: usize = 1;
 const ICMPPKT_CODE_SIZE: usize = 1;
-const ICMPPKT_REQ_SIZE: usize = ICMPPKT_ID_SIZE + ICMPPKT_ADDR_SIZE
-    + ICMPPKT_SEQNO_SIZE + ICMPPKT_TTL_SIZE + ICMPPKT_DATA_SIZE;
-const ICMPPKT_REPLY_SIZE: usize = ICMPPKT_ID_SIZE + ICMPPKT_ADDR_SIZE
-    + ICMPPKT_TYPE_SIZE + ICMPPKT_CODE_SIZE + ICMPPKT_SEQNO_SIZE;
-
+const ICMPPKT_REQ_SIZE: usize =
+    ICMPPKT_ID_SIZE + ICMPPKT_ADDR_SIZE + ICMPPKT_SEQNO_SIZE + ICMPPKT_TTL_SIZE + ICMPPKT_DATA_SIZE;
+const ICMPPKT_REPLY_SIZE: usize = ICMPPKT_ID_SIZE
+    + ICMPPKT_ADDR_SIZE
+    + ICMPPKT_TYPE_SIZE
+    + ICMPPKT_CODE_SIZE
+    + ICMPPKT_SEQNO_SIZE;
 
 pub(crate) struct Decoder {
     buffer: BytesMut,
 }
 
 #[derive(Default)]
-pub(crate) struct Encoder {
-}
-
+pub(crate) struct Encoder {}
 
 impl http_datagram_codec::Decoder for Decoder {
     type Datagram = downstream::IcmpDatagram;
@@ -66,9 +64,7 @@ impl http_datagram_codec::Decoder for Decoder {
 
                 http_datagram_codec::DecodeResult::Complete(
                     downstream::IcmpDatagram {
-                        meta: downstream::IcmpDatagramMeta {
-                            peer: destination,
-                        },
+                        meta: downstream::IcmpDatagramMeta { peer: destination },
                         message: if destination.is_ipv4() {
                             icmp_utils::Message::V4(icmp_utils::v4::Message::Echo(echo))
                         } else {
@@ -92,18 +88,18 @@ impl Decoder {
 
     fn on_message_chunk(&mut self, mut chunk: Bytes) -> Option<(Bytes, Bytes)> {
         if !self.buffer.is_empty() || self.buffer.len() + chunk.len() < ICMPPKT_REQ_SIZE {
-            self.buffer.extend(
-                chunk.split_to(std::cmp::min(chunk.len(), ICMPPKT_REQ_SIZE - self.buffer.len()))
-            );
+            self.buffer.extend(chunk.split_to(std::cmp::min(
+                chunk.len(),
+                ICMPPKT_REQ_SIZE - self.buffer.len(),
+            )));
             assert!(self.buffer.len() <= ICMPPKT_REQ_SIZE);
             if self.buffer.len() < ICMPPKT_REQ_SIZE {
                 assert!(chunk.is_empty());
                 None
             } else {
                 Some((
-                    std::mem::replace(
-                        &mut self.buffer, BytesMut::with_capacity(ICMPPKT_REQ_SIZE)
-                    ).freeze(),
+                    std::mem::replace(&mut self.buffer, BytesMut::with_capacity(ICMPPKT_REQ_SIZE))
+                        .freeze(),
                     chunk,
                 ))
             }

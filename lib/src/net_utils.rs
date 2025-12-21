@@ -1,12 +1,15 @@
-extern {
+extern "C" {
     #[cfg(target_os = "macos")]
-    fn bind_to_interface_by_index(fd: libc::c_int, family: libc::c_int, idx: libc::c_uint) -> libc::c_int;
+    fn bind_to_interface_by_index(
+        fd: libc::c_int,
+        family: libc::c_int,
+        idx: libc::c_uint,
+    ) -> libc::c_int;
 }
 
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6, UdpSocket};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-
 
 pub(crate) const MIN_LINK_MTU: usize = 1280;
 pub(crate) const MIN_IPV4_HEADER_SIZE: usize = 20;
@@ -14,7 +17,8 @@ pub(crate) const MIN_IPV6_HEADER_SIZE: usize = 40;
 pub(crate) const MAX_IP_PACKET_SIZE: usize = 2_usize.pow(16);
 pub(crate) const UDP_HEADER_SIZE: usize = 8;
 /// IPv6 allows sending slightly bigger datagrams, but assume it does not matter
-pub(crate) const MAX_UDP_PAYLOAD_SIZE: usize = MAX_IP_PACKET_SIZE - MIN_IPV4_HEADER_SIZE - UDP_HEADER_SIZE;
+pub(crate) const MAX_UDP_PAYLOAD_SIZE: usize =
+    MAX_IP_PACKET_SIZE - MIN_IPV4_HEADER_SIZE - UDP_HEADER_SIZE;
 pub(crate) const PLAIN_DNS_PORT_NUMBER: u16 = 53;
 pub(crate) const PLAIN_HTTP_PORT_NUMBER: u16 = 80;
 
@@ -34,7 +38,6 @@ pub(crate) const HTTP3_DATA_FRAME_TYPE_WIRE_LENGTH: usize = varint_len(0);
 pub(crate) const MIN_USABLE_QUIC_STREAM_CAPACITY: usize = http3_data_frame_overhead(1) + 1;
 
 const SCRUBBED_PLACEHOLDER: &str = "scrubbed";
-
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub(crate) enum Channel {
@@ -67,7 +70,8 @@ impl PeerAddr for tokio::net::TcpStream {
 }
 
 impl<IO> PeerAddr for tokio_rustls::server::TlsStream<IO>
-    where IO: PeerAddr
+where
+    IO: PeerAddr,
 {
     fn peer_addr(&self) -> io::Result<SocketAddr> {
         self.get_ref().0.peer_addr()
@@ -117,13 +121,17 @@ pub(crate) fn put_fixed_size_ip(bytes: &mut BytesMut, ip: &IpAddr) {
         IpAddr::V4(ip) => {
             bytes.put_slice(&[0; IPV4_PADDING_WIRE_LENGTH]);
             bytes.put_slice(&ip.octets());
-        },
+        }
         IpAddr::V6(ip) => bytes.put_slice(&ip.octets()),
     }
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) fn bind_to_interface(fd: libc::c_int, _family: libc::c_int, name: &str) -> io::Result<()> {
+pub(crate) fn bind_to_interface(
+    fd: libc::c_int,
+    _family: libc::c_int,
+    name: &str,
+) -> io::Result<()> {
     unsafe {
         let r = libc::setsockopt(
             fd,
@@ -141,7 +149,11 @@ pub(crate) fn bind_to_interface(fd: libc::c_int, _family: libc::c_int, name: &st
 }
 
 #[cfg(target_os = "macos")]
-pub(crate) fn bind_to_interface(fd: libc::c_int, family: libc::c_int, name: &str) -> io::Result<()> {
+pub(crate) fn bind_to_interface(
+    fd: libc::c_int,
+    family: libc::c_int,
+    name: &str,
+) -> io::Result<()> {
     unsafe {
         let idx = libc::if_nametoindex(name.as_ptr() as *const libc::c_char);
         if idx == 0 {
@@ -212,9 +224,10 @@ pub(crate) fn libc_to_socket_addr(addr: &libc::sockaddr_storage) -> SocketAddr {
             let addr = &*(addr as *const _ as *const libc::sockaddr_in);
             SocketAddrV4::new(
                 Ipv4Addr::from(addr.sin_addr.s_addr.to_ne_bytes()),
-                u16::from_be(addr.sin_port)
-            ).into()
-        }
+                u16::from_be(addr.sin_port),
+            )
+            .into()
+        },
         libc::AF_INET6 => unsafe {
             let addr = &*(addr as *const _ as *const libc::sockaddr_in6);
             SocketAddrV6::new(
@@ -222,15 +235,19 @@ pub(crate) fn libc_to_socket_addr(addr: &libc::sockaddr_storage) -> SocketAddr {
                 u16::from_be(addr.sin6_port),
                 addr.sin6_flowinfo,
                 addr.sin6_scope_id,
-            ).into()
-        }
-        _ => unreachable!()
+            )
+            .into()
+        },
+        _ => unreachable!(),
     }
 }
 
 /// Do [`libc::recvfrom`] over `fd` in a buffer of `buffer_size` size.
 /// If [`None`], `buffer_size` defaults to [`MIN_LINK_MTU`].
-pub(crate) fn recv_from(fd: libc::c_int, buffer_size: Option<usize>) -> io::Result<(IpAddr, Bytes)> {
+pub(crate) fn recv_from(
+    fd: libc::c_int,
+    buffer_size: Option<usize>,
+) -> io::Result<(IpAddr, Bytes)> {
     let mut buffer = BytesMut::zeroed(buffer_size.unwrap_or(MIN_LINK_MTU));
 
     unsafe {
@@ -251,10 +268,7 @@ pub(crate) fn recv_from(fd: libc::c_int, buffer_size: Option<usize>) -> io::Resu
 
         buffer.truncate(r as usize);
 
-        Ok((
-            libc_to_socket_addr(&peer).ip(),
-            buffer.freeze(),
-        ))
+        Ok((libc_to_socket_addr(&peer).ip(), buffer.freeze()))
     }
 }
 
@@ -295,7 +309,7 @@ pub(crate) fn skip_ipv6_header(mut packet: Bytes) -> Option<(libc::c_int, Bytes)
 
     loop {
         match next_protocol {
-            libc ::IPPROTO_HOPOPTS | libc::IPPROTO_ROUTING | libc::IPPROTO_DSTOPTS => {
+            libc::IPPROTO_HOPOPTS | libc::IPPROTO_ROUTING | libc::IPPROTO_DSTOPTS => {
                 if packet.len() < 2 {
                     return None;
                 }
@@ -454,9 +468,14 @@ pub(crate) fn scrub_request(request: &http::request::Parts) -> http::request::Pa
     r.uri.clone_from(&request.uri);
     r.version.clone_from(&request.version);
     r.headers.clone_from(&request.headers);
-    for header in &[http::header::AUTHORIZATION, http::header::PROXY_AUTHORIZATION, http::header::COOKIE] {
+    for header in &[
+        http::header::AUTHORIZATION,
+        http::header::PROXY_AUTHORIZATION,
+        http::header::COOKIE,
+    ] {
         if r.headers.contains_key(header) {
-            r.headers.insert(header, http::HeaderValue::from_static(SCRUBBED_PLACEHOLDER));
+            r.headers
+                .insert(header, http::HeaderValue::from_static(SCRUBBED_PLACEHOLDER));
         }
     }
     r
@@ -473,9 +492,11 @@ pub(crate) fn scrub_sni(mut sni: String) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::{Ipv4Addr, Ipv6Addr};
+    use crate::net_utils::{
+        libc_to_socket_addr, scrub_request, scrub_sni, socket_addr_to_libc, SCRUBBED_PLACEHOLDER,
+    };
     use http::uri;
-    use crate::net_utils::{libc_to_socket_addr, socket_addr_to_libc, scrub_sni, scrub_request, SCRUBBED_PLACEHOLDER};
+    use std::net::{Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn sockaddr_conversion_v4() {
@@ -485,7 +506,9 @@ mod tests {
         let (sa, sa_len) = socket_addr_to_libc(&(ip, port).into());
         assert_eq!(sa.ss_family as libc::c_int, libc::AF_INET);
         assert_eq!(std::mem::size_of::<libc::sockaddr_in>(), sa_len as usize);
-        assert_eq!(port.to_be(), unsafe { (*(&sa as *const libc::sockaddr_storage as *const libc::sockaddr_in)).sin_port });
+        assert_eq!(port.to_be(), unsafe {
+            (*(&sa as *const libc::sockaddr_storage as *const libc::sockaddr_in)).sin_port
+        });
 
         let sa = libc_to_socket_addr(&sa);
         assert_eq!(sa.ip(), ip);
@@ -500,7 +523,9 @@ mod tests {
         let (sa, sa_len) = socket_addr_to_libc(&(ip, port).into());
         assert_eq!(sa.ss_family as libc::c_int, libc::AF_INET6);
         assert_eq!(std::mem::size_of::<libc::sockaddr_in6>(), sa_len as usize);
-        assert_eq!(port.to_be(), unsafe { (*(&sa as *const libc::sockaddr_storage as *const libc::sockaddr_in6)).sin6_port });
+        assert_eq!(port.to_be(), unsafe {
+            (*(&sa as *const libc::sockaddr_storage as *const libc::sockaddr_in6)).sin6_port
+        });
 
         let sa = libc_to_socket_addr(&sa);
         assert_eq!(sa.ip(), ip);
@@ -510,31 +535,87 @@ mod tests {
     #[test]
     fn scrubbing_of_sni() {
         assert_eq!("one", scrub_sni("one".to_string()));
-        assert_eq!(format!("{}.", SCRUBBED_PLACEHOLDER), crate::net_utils::scrub_sni("one.".to_string()));
-        assert_eq!(format!("{}.one", SCRUBBED_PLACEHOLDER), crate::net_utils::scrub_sni(".one".to_string()));
-        assert_eq!(format!("{}.two", SCRUBBED_PLACEHOLDER), crate::net_utils::scrub_sni("one.two".to_string()));
-        assert_eq!(format!("{}.two.three", SCRUBBED_PLACEHOLDER), crate::net_utils::scrub_sni("one.two.three".to_string()));
+        assert_eq!(
+            format!("{}.", SCRUBBED_PLACEHOLDER),
+            crate::net_utils::scrub_sni("one.".to_string())
+        );
+        assert_eq!(
+            format!("{}.one", SCRUBBED_PLACEHOLDER),
+            crate::net_utils::scrub_sni(".one".to_string())
+        );
+        assert_eq!(
+            format!("{}.two", SCRUBBED_PLACEHOLDER),
+            crate::net_utils::scrub_sni("one.two".to_string())
+        );
+        assert_eq!(
+            format!("{}.two.three", SCRUBBED_PLACEHOLDER),
+            crate::net_utils::scrub_sni("one.two.three".to_string())
+        );
     }
 
     #[test]
     fn scrubbing_of_headers() {
         let mut original = http::request::Request::new(()).into_parts().0;
         original.method.clone_from(&http::Method::GET);
-        original.uri.clone_from(&uri::Uri::from_static("https://httpbin.agrd.dev/abcd"));
+        original
+            .uri
+            .clone_from(&uri::Uri::from_static("https://httpbin.agrd.dev/abcd"));
         original.version.clone_from(&http::Version::HTTP_11);
-        original.headers.insert(http::header::AUTHORIZATION, http::HeaderValue::from_static("secret1"));
-        original.headers.insert(http::header::PROXY_AUTHORIZATION, http::HeaderValue::from_static("secret2"));
-        original.headers.insert(http::header::COOKIE, http::HeaderValue::from_static("cookie1"));
-        original.headers.append(http::header::COOKIE, http::HeaderValue::from_static("cookie2"));
-        original.headers.append(http::header::COOKIE, http::HeaderValue::from_static("cookie3"));
-        original.headers.insert(http::header::ACCEPT, http::HeaderValue::from_static("text/html"));
+        original.headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("secret1"),
+        );
+        original.headers.insert(
+            http::header::PROXY_AUTHORIZATION,
+            http::HeaderValue::from_static("secret2"),
+        );
+        original.headers.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("cookie1"),
+        );
+        original.headers.append(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("cookie2"),
+        );
+        original.headers.append(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("cookie3"),
+        );
+        original.headers.insert(
+            http::header::ACCEPT,
+            http::HeaderValue::from_static("text/html"),
+        );
         let mut scrubbed = scrub_request(&original);
         assert_eq!(original.method, scrubbed.method);
         assert_eq!(original.uri, scrubbed.uri);
         assert_eq!(original.version, scrubbed.version);
-        assert_eq!(vec![SCRUBBED_PLACEHOLDER], scrubbed.headers.get_all(http::header::AUTHORIZATION).iter().map(|x| x.to_str().unwrap()).collect::<Vec<&str>>());
-        assert_eq!(vec![SCRUBBED_PLACEHOLDER], scrubbed.headers.get_all(http::header::PROXY_AUTHORIZATION).iter().map(|x| x.to_str().unwrap()).collect::<Vec<&str>>());
-        assert_eq!(vec![SCRUBBED_PLACEHOLDER], scrubbed.headers.get_all(http::header::COOKIE).iter().map(|x| x.to_str().unwrap()).collect::<Vec<&str>>());
+        assert_eq!(
+            vec![SCRUBBED_PLACEHOLDER],
+            scrubbed
+                .headers
+                .get_all(http::header::AUTHORIZATION)
+                .iter()
+                .map(|x| x.to_str().unwrap())
+                .collect::<Vec<&str>>()
+        );
+        assert_eq!(
+            vec![SCRUBBED_PLACEHOLDER],
+            scrubbed
+                .headers
+                .get_all(http::header::PROXY_AUTHORIZATION)
+                .iter()
+                .map(|x| x.to_str().unwrap())
+                .collect::<Vec<&str>>()
+        );
+        assert_eq!(
+            vec![SCRUBBED_PLACEHOLDER],
+            scrubbed
+                .headers
+                .get_all(http::header::COOKIE)
+                .iter()
+                .map(|x| x.to_str().unwrap())
+                .collect::<Vec<&str>>()
+        );
         original.headers.remove(http::header::AUTHORIZATION);
         scrubbed.headers.remove(http::header::AUTHORIZATION);
         original.headers.remove(http::header::PROXY_AUTHORIZATION);
@@ -547,11 +628,40 @@ mod tests {
     #[test]
     fn scrubbing_of_headers_do_not_add() {
         let mut original = http::request::Request::new(()).into_parts().0;
-        original.headers.insert(http::header::AUTHORIZATION, http::HeaderValue::from_static("secret1"));
-        original.headers.insert(http::header::PROXY_AUTHORIZATION, http::HeaderValue::from_static("secret2"));
+        original.headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_static("secret1"),
+        );
+        original.headers.insert(
+            http::header::PROXY_AUTHORIZATION,
+            http::HeaderValue::from_static("secret2"),
+        );
         let scrubbed = scrub_request(&original);
-        assert_eq!(vec![SCRUBBED_PLACEHOLDER], scrubbed.headers.get_all(http::header::AUTHORIZATION).iter().map(|x| x.to_str().unwrap()).collect::<Vec<&str>>());
-        assert_eq!(vec![SCRUBBED_PLACEHOLDER], scrubbed.headers.get_all(http::header::PROXY_AUTHORIZATION).iter().map(|x| x.to_str().unwrap()).collect::<Vec<&str>>());
-        assert_eq!(0, scrubbed.headers.get_all(http::header::COOKIE).iter().count());
+        assert_eq!(
+            vec![SCRUBBED_PLACEHOLDER],
+            scrubbed
+                .headers
+                .get_all(http::header::AUTHORIZATION)
+                .iter()
+                .map(|x| x.to_str().unwrap())
+                .collect::<Vec<&str>>()
+        );
+        assert_eq!(
+            vec![SCRUBBED_PLACEHOLDER],
+            scrubbed
+                .headers
+                .get_all(http::header::PROXY_AUTHORIZATION)
+                .iter()
+                .map(|x| x.to_str().unwrap())
+                .collect::<Vec<&str>>()
+        );
+        assert_eq!(
+            0,
+            scrubbed
+                .headers
+                .get_all(http::header::COOKIE)
+                .iter()
+                .count()
+        );
     }
 }

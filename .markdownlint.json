@@ -12,9 +12,7 @@
     "siblings_only": true
   },
   "no-inline-html": {
-    "allowed_elements": [
-      "a"
-    ]
+    "allowed_elements": ["a", "p", "picture", "source", "img"]
   },
   "no-trailing-spaces": {
     "br_spaces": 0

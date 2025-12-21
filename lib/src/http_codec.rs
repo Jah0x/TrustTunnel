@@ -1,13 +1,12 @@
+use crate::tls_demultiplexer::Protocol;
+use crate::{authentication, datagram_pipe, log_utils, pipe};
+use async_trait::async_trait;
+use bytes::Bytes;
+use http::uri::Authority;
+use http::{Response, StatusCode};
 use std::io;
 use std::io::ErrorKind;
 use std::net::IpAddr;
-use async_trait::async_trait;
-use bytes::Bytes;
-use http::{Response, StatusCode};
-use http::uri::Authority;
-use crate::{authentication, datagram_pipe, log_utils, pipe};
-use crate::tls_demultiplexer::Protocol;
-
 
 pub(crate) type RequestHeaders = http::request::Parts;
 pub(crate) type ResponseHeaders = http::response::Parts;
@@ -43,8 +42,7 @@ pub(crate) trait PendingRequest: Send {
             *hs = request.headers.clone();
         }
         // assume it's ok as original headers were built successfully
-        builder.body(()).unwrap()
-            .into_parts().0
+        builder.body(()).unwrap().into_parts().0
     }
 
     /// Get the address of a VPN client made the connection request
@@ -52,33 +50,42 @@ pub(crate) trait PendingRequest: Send {
 
     /// Get the authorization info if some
     fn auth_info(&self) -> io::Result<Option<authentication::Source>> {
-        let header = match self.request().headers.get(http::header::PROXY_AUTHORIZATION) {
+        let header = match self
+            .request()
+            .headers
+            .get(http::header::PROXY_AUTHORIZATION)
+        {
             None => return Ok(None),
             Some(x) => x,
         };
 
-        header.to_str()
+        header
+            .to_str()
             .ok()
             .and_then(|s| s.strip_prefix("Basic "))
             .map(|s| Some(authentication::Source::ProxyBasic(s.into())))
-            .ok_or_else(|| io::Error::new(
-                ErrorKind::Other,
-                format!("Unexpected authorization header: {:?}", self.request())
-            ))
+            .ok_or_else(|| {
+                io::Error::new(
+                    ErrorKind::Other,
+                    format!("Unexpected authorization header: {:?}", self.request()),
+                )
+            })
     }
 
     /// Get the request authority
     fn authority(&self) -> io::Result<&Authority> {
-        self.request().uri.authority()
-            .ok_or_else(|| io::Error::new(
+        self.request().uri.authority().ok_or_else(|| {
+            io::Error::new(
                 ErrorKind::Other,
-                format!("Authority not found: {:?}", self.request())
-            ))
+                format!("Authority not found: {:?}", self.request()),
+            )
+        })
     }
 
     /// Get the user agent
     fn user_agent(&self) -> Option<String> {
-        self.request().headers
+        self.request()
+            .headers
             .get(http::header::USER_AGENT)
             .map(http::header::HeaderValue::to_str)?
             .ok()
@@ -102,8 +109,11 @@ pub(crate) trait PendingRespond: Send {
     }
 
     /// Send the response to a client
-    fn send_response(self: Box<Self>, response: ResponseHeaders, eof: bool)
-        -> io::Result<Box<dyn RespondedStreamSink>>;
+    fn send_response(
+        self: Box<Self>,
+        response: ResponseHeaders,
+        eof: bool,
+    ) -> io::Result<Box<dyn RespondedStreamSink>>;
 
     /// Send the OK response to a client
     fn send_ok_response(self: Box<Self>, eof: bool) -> io::Result<Box<dyn RespondedStreamSink>> {
@@ -112,7 +122,9 @@ pub(crate) trait PendingRespond: Send {
 
     /// Send a bad response to a client
     fn send_bad_response(
-        self: Box<Self>, status: StatusCode, extra_headers: Vec<(String, String)>,
+        self: Box<Self>,
+        status: StatusCode,
+        extra_headers: Vec<(String, String)>,
     ) -> io::Result<()> {
         let response = {
             let mut b = Response::builder().status(status);
@@ -122,7 +134,8 @@ pub(crate) trait PendingRespond: Send {
             b.body(()).unwrap()
         };
 
-        self.send_response(response.into_parts().0, true).map(|_| ())
+        self.send_response(response.into_parts().0, true)
+            .map(|_| ())
     }
 }
 

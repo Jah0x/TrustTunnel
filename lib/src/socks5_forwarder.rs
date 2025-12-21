@@ -1,3 +1,13 @@
+use crate::forwarder::Forwarder;
+use crate::settings::{ForwardProtocolSettings, Settings, Socks5ForwarderSettings};
+use crate::tcp_forwarder::TcpForwarder;
+use crate::{
+    authentication, core, datagram_pipe, downstream, forwarder, log_id, log_utils, net_utils, pipe,
+    socks5_client, tunnel,
+};
+use async_trait::async_trait;
+use base64::Engine;
+use bytes::BytesMut;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, LinkedList};
 use std::io;
@@ -6,16 +16,8 @@ use std::net::{IpAddr, SocketAddr};
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
-use async_trait::async_trait;
-use base64::Engine;
-use bytes::BytesMut;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
-use crate::forwarder::Forwarder;
-use crate::{authentication, core, datagram_pipe, downstream, forwarder, log_id, log_utils, net_utils, pipe, socks5_client, tunnel};
-use crate::settings::{ForwardProtocolSettings, Settings, Socks5ForwarderSettings};
-use crate::tcp_forwarder::TcpForwarder;
-
 
 pub(crate) struct Socks5Forwarder {
     context: Arc<core::Context>,
@@ -61,15 +63,11 @@ struct DatagramMuxAuthenticator {
     core_settings: Arc<Settings>,
 }
 
-
 impl Socks5Forwarder {
     pub fn new(context: Arc<core::Context>) -> Self {
-        Self {
-            context
-        }
+        Self { context }
     }
 }
-
 
 #[async_trait]
 impl forwarder::UdpDatagramPipeShared for DatagramTransceiverShared {
@@ -84,19 +82,30 @@ impl forwarder::UdpDatagramPipeShared for DatagramTransceiverShared {
             TcpStream::connect(socks_settings(&self.core_settings).address).await?,
             self.auth.clone(),
             socks5_client::Request::UdpAssociate,
-        ).await {
+        )
+        .await
+        {
             Ok(socks5_client::ConnectResult::TcpConnection(_)) => unreachable!(),
             Ok(socks5_client::ConnectResult::UdpAssociation(x)) => Arc::new(x),
-            Ok(socks5_client::ConnectResult::Failure(x)) => return Err(io::Error::new(
-                ErrorKind::Other, format!("SOCKS server replied with error code: {:?}", x)
-            )),
+            Ok(socks5_client::ConnectResult::Failure(x)) => {
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    format!("SOCKS server replied with error code: {:?}", x),
+                ))
+            }
             Err(socks5_client::Error::Io(x)) => return Err(x),
-            Err(socks5_client::Error::Protocol(x)) => return Err(io::Error::new(
-                ErrorKind::Other, format!("SOCKS protocol error: {}", x)
-            )),
+            Err(socks5_client::Error::Protocol(x)) => {
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    format!("SOCKS protocol error: {}", x),
+                ))
+            }
             Err(socks5_client::Error::Authentication(x)) => {
                 self.associations.lock().unwrap().clear();
-                return Err(io::Error::new(ErrorKind::Other, format!("Authentication error: {}", x)));
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    format!("Authentication error: {}", x),
+                ));
             }
         };
 
@@ -105,7 +114,7 @@ impl forwarder::UdpDatagramPipeShared for DatagramTransceiverShared {
             UdpAssociation {
                 socket,
                 peers: HashSet::from([meta.destination]),
-            }
+            },
         );
 
         match self.new_socket_tx.try_send(()) {
@@ -113,7 +122,8 @@ impl forwarder::UdpDatagramPipeShared for DatagramTransceiverShared {
             Err(mpsc::error::TrySendError::Closed(_)) => {
                 self.associations.lock().unwrap().remove(&meta.source);
                 Err(io::Error::new(
-                    ErrorKind::Other, "Source waker is unexpectedly closed"
+                    ErrorKind::Other,
+                    "Source waker is unexpectedly closed",
                 ))
             }
         }
@@ -157,19 +167,21 @@ impl Forwarder for Socks5Forwarder {
             core_settings: self.context.settings.clone(),
             associations: Default::default(),
             new_socket_tx: tx,
-            auth: meta.auth
-                .map(|x|
+            auth: meta
+                .auth
+                .map(|x| {
                     if socks_settings(&self.context.settings).extended_auth {
                         make_extended_auth(
                             x,
                             &meta.tls_domain,
                             &meta.client_address,
                             meta.user_agent.as_ref().map(|x| x.as_ref()),
-                        ).map(socks5_client::Authentication::into_owned)
+                        )
+                        .map(socks5_client::Authentication::into_owned)
                     } else {
                         make_auth(x)
                     }
-                )
+                })
                 .transpose()
                 .map_err(|x| io::Error::new(ErrorKind::Other, x))?,
             id,
@@ -183,19 +195,22 @@ impl Forwarder for Socks5Forwarder {
                 pending_read: None,
                 pending_closures: Default::default(),
             }),
-            Box::new(DatagramSink {
-                shared,
-            }),
+            Box::new(DatagramSink { shared }),
         ))
     }
 
-    fn make_icmp_datagram_multiplexer(&self, id: log_utils::IdChain<u64>)
-        -> io::Result<Option<(
+    fn make_icmp_datagram_multiplexer(
+        &self,
+        id: log_utils::IdChain<u64>,
+    ) -> io::Result<
+        Option<(
             Box<dyn datagram_pipe::Source<Output = forwarder::IcmpDatagram>>,
             Box<dyn datagram_pipe::Sink<Input = downstream::IcmpDatagram>>,
-        )>>
-    {
-        self.context.icmp_forwarder.as_ref()
+        )>,
+    > {
+        self.context
+            .icmp_forwarder
+            .as_ref()
             .map(|x| x.make_multiplexer(id))
             .transpose()
     }
@@ -209,23 +224,28 @@ impl forwarder::TcpConnector for TcpConnector {
         meta: forwarder::TcpConnectionMeta,
     ) -> Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>), tunnel::ConnectionError> {
         let (destination, port) = match &meta.destination {
-            net_utils::TcpDestination::Address(x) =>
-                (socks5_client::Address::IpAddress(x.ip()), x.port()),
-            net_utils::TcpDestination::HostName(x) =>
-                (socks5_client::Address::DomainName(Cow::Borrowed(&x.0)), x.1),
+            net_utils::TcpDestination::Address(x) => {
+                (socks5_client::Address::IpAddress(x.ip()), x.port())
+            }
+            net_utils::TcpDestination::HostName(x) => {
+                (socks5_client::Address::DomainName(Cow::Borrowed(&x.0)), x.1)
+            }
         };
 
         let stream = match TcpStream::connect(socks_settings(&self.core_settings).address).await {
             Ok(s) => s,
-            Err(e) => return Err(tunnel::ConnectionError::Io(io::Error::new(
-                ErrorKind::Other, format!("Failed to connect to proxy server: {}", e)
-            ))),
+            Err(e) => {
+                return Err(tunnel::ConnectionError::Io(io::Error::new(
+                    ErrorKind::Other,
+                    format!("Failed to connect to proxy server: {}", e),
+                )))
+            }
         };
 
         match socks5_client::connect(
             stream,
             meta.auth
-                .map(|x|
+                .map(|x| {
                     if socks_settings(&self.core_settings).extended_auth {
                         make_extended_auth(
                             x,
@@ -236,32 +256,45 @@ impl forwarder::TcpConnector for TcpConnector {
                     } else {
                         make_auth(x)
                     }
-                )
+                })
                 .transpose()
                 .map_err(tunnel::ConnectionError::Other)?,
             socks5_client::Request::Connect(destination, port),
-        ).await {
-            Ok(socks5_client::ConnectResult::TcpConnection(stream)) =>
-                Ok(TcpForwarder::pipe_from_stream(stream, id)),
+        )
+        .await
+        {
+            Ok(socks5_client::ConnectResult::TcpConnection(stream)) => {
+                Ok(TcpForwarder::pipe_from_stream(stream, id))
+            }
             Ok(socks5_client::ConnectResult::UdpAssociation(_)) => unreachable!(),
-            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::HostUnreachable)) =>
-                Err(tunnel::ConnectionError::HostUnreachable),
-            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::NetworkUnreachable)) =>
-                Err(tunnel::ConnectionError::HostUnreachable),
-            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::ConnectionRefused)) =>
-                Err(tunnel::ConnectionError::Io(ErrorKind::ConnectionRefused.into())),
-            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::TtlExpired)) =>
-                Err(tunnel::ConnectionError::Timeout),
+            Ok(socks5_client::ConnectResult::Failure(
+                socks5_client::ReplyCode::HostUnreachable,
+            )) => Err(tunnel::ConnectionError::HostUnreachable),
+            Ok(socks5_client::ConnectResult::Failure(
+                socks5_client::ReplyCode::NetworkUnreachable,
+            )) => Err(tunnel::ConnectionError::HostUnreachable),
+            Ok(socks5_client::ConnectResult::Failure(
+                socks5_client::ReplyCode::ConnectionRefused,
+            )) => Err(tunnel::ConnectionError::Io(
+                ErrorKind::ConnectionRefused.into(),
+            )),
+            Ok(socks5_client::ConnectResult::Failure(socks5_client::ReplyCode::TtlExpired)) => {
+                Err(tunnel::ConnectionError::Timeout)
+            }
             Ok(socks5_client::ConnectResult::Failure(x)) => Err(tunnel::ConnectionError::Other(
-                format!("SOCKS server replied with error code: {:?}", x)
+                format!("SOCKS server replied with error code: {:?}", x),
             )),
             Err(socks5_client::Error::Io(x)) => Err(tunnel::ConnectionError::Io(io::Error::new(
-                ErrorKind::Other, format!("Proxy connection error: {}", x)
+                ErrorKind::Other,
+                format!("Proxy connection error: {}", x),
             ))),
-            Err(socks5_client::Error::Protocol(x)) => Err(tunnel::ConnectionError::Other(
-                format!("SOCKS protocol error: {}", x)
-            )),
-            Err(socks5_client::Error::Authentication(x)) => Err(tunnel::ConnectionError::Authentication(x)),
+            Err(socks5_client::Error::Protocol(x)) => Err(tunnel::ConnectionError::Other(format!(
+                "SOCKS protocol error: {}",
+                x
+            ))),
+            Err(socks5_client::Error::Authentication(x)) => {
+                Err(tunnel::ConnectionError::Authentication(x))
+            }
         }
     }
 }
@@ -276,74 +309,92 @@ impl forwarder::DatagramMultiplexerAuthenticator for DatagramMuxAuthenticator {
         user_agent: Option<&'_ str>,
     ) -> Result<(), tunnel::ConnectionError> {
         match socks5_client::connect(
-            TcpStream::connect(socks_settings(&self.core_settings).address).await
+            TcpStream::connect(socks_settings(&self.core_settings).address)
+                .await
                 .map_err(tunnel::ConnectionError::Io)?,
-            Some(if socks_settings(&self.core_settings).extended_auth {
-                make_extended_auth(auth, tls_domain, &client_address, user_agent)
-            } else {
-                make_auth(auth)
-            }.map_err(|x| tunnel::ConnectionError::Io(io::Error::new(ErrorKind::Other, x)))?),
+            Some(
+                if socks_settings(&self.core_settings).extended_auth {
+                    make_extended_auth(auth, tls_domain, &client_address, user_agent)
+                } else {
+                    make_auth(auth)
+                }
+                .map_err(|x| tunnel::ConnectionError::Io(io::Error::new(ErrorKind::Other, x)))?,
+            ),
             socks5_client::Request::UdpAssociate,
-        ).await {
+        )
+        .await
+        {
             Ok(socks5_client::ConnectResult::TcpConnection(_)) => unreachable!(),
             Ok(socks5_client::ConnectResult::UdpAssociation(_)) => Ok(()),
             Ok(socks5_client::ConnectResult::Failure(x)) => Err(tunnel::ConnectionError::Other(
-                format!("SOCKS server replied with error code: {:?}", x)
+                format!("SOCKS server replied with error code: {:?}", x),
             )),
             Err(socks5_client::Error::Io(x)) => Err(tunnel::ConnectionError::Io(x)),
-            Err(socks5_client::Error::Protocol(x)) => Err(tunnel::ConnectionError::Other(
-                format!("SOCKS protocol error: {}", x)
-            )),
-            Err(socks5_client::Error::Authentication(x)) => Err(tunnel::ConnectionError::Authentication(x)),
+            Err(socks5_client::Error::Protocol(x)) => Err(tunnel::ConnectionError::Other(format!(
+                "SOCKS protocol error: {}",
+                x
+            ))),
+            Err(socks5_client::Error::Authentication(x)) => {
+                Err(tunnel::ConnectionError::Authentication(x))
+            }
         }
     }
 }
 
 impl DatagramSource {
-    async fn read_pending_socket(&self, source: &SocketAddr) -> io::Result<Option<forwarder::UdpDatagramReadStatus>> {
+    async fn read_pending_socket(
+        &self,
+        source: &SocketAddr,
+    ) -> io::Result<Option<forwarder::UdpDatagramReadStatus>> {
         let socket = match self.shared.associations.lock().unwrap().get(source) {
             None => {
-                log_id!(debug, self.shared.id, "UDP association not found: source={}", source);
+                log_id!(
+                    debug,
+                    self.shared.id,
+                    "UDP association not found: source={}",
+                    source
+                );
                 return Ok(None);
             }
             Some(x) => x.socket.clone(),
         };
 
         let mut buffer = BytesMut::zeroed(net_utils::MAX_UDP_PAYLOAD_SIZE);
-        let (n, peer) = socket.recv_from(buffer.as_mut()).await
+        let (n, peer) = socket
+            .recv_from(buffer.as_mut())
+            .await
             .map_err(socks_to_io_error)?;
         buffer.truncate(n);
 
-        Ok(Some(forwarder::UdpDatagramReadStatus::Read(forwarder::UdpDatagram {
-            meta: forwarder::UdpDatagramMeta {
-                source: peer,
-                destination: *source,
+        Ok(Some(forwarder::UdpDatagramReadStatus::Read(
+            forwarder::UdpDatagram {
+                meta: forwarder::UdpDatagramMeta {
+                    source: peer,
+                    destination: *source,
+                },
+                payload: buffer.freeze(),
             },
-            payload: buffer.freeze(),
-        })))
+        )))
     }
 
     fn on_socket_error(&mut self, source: &SocketAddr, error: io::Error) {
         if let Some(a) = self.shared.associations.lock().unwrap().remove(source) {
-            self.pending_closures.extend(
-                a.peers.into_iter()
-                    .map(|peer| { (
+            self.pending_closures
+                .extend(a.peers.into_iter().map(|peer| {
+                    (
                         forwarder::UdpDatagramMeta {
                             source: peer,
                             destination: *source,
                         },
                         io::Error::new(error.kind(), error.to_string()),
-                    ) })
-            );
+                    )
+                }));
         }
     }
 
     async fn poll_events(&mut self) -> io::Result<Option<SocketError>> {
         let futures = {
-            type Future = Box<
-                dyn futures::Future<Output = Result<SocketAddr, SocketError>>
-                + Send
-            >;
+            type Future = Box<dyn futures::Future<Output = Result<SocketAddr, SocketError>> + Send>;
 
             let associations = self.shared.associations.lock().unwrap();
             let mut futures: Vec<Pin<Future>> = Vec::with_capacity(1 + associations.len());
@@ -386,9 +437,13 @@ impl DatagramSource {
 }
 
 async fn listen_socket_read(
-    source: SocketAddr, socket: Arc<UdpAssociationSocket>
+    source: SocketAddr,
+    socket: Arc<UdpAssociationSocket>,
 ) -> Result<SocketAddr, SocketError> {
-    socket.get_ref().readable().await
+    socket
+        .get_ref()
+        .readable()
+        .await
         .map(|_| source)
         .map_err(|io| SocketError { source, io })
 }
@@ -408,8 +463,13 @@ impl datagram_pipe::Source for DatagramSource {
                     Ok(None) => (),
                     Ok(Some(x)) => return Ok(x),
                     Err(e) => {
-                        log_id!(debug, self.shared.id, "Error reading UDP socket: source={} error={}",
-                            source, e);
+                        log_id!(
+                            debug,
+                            self.shared.id,
+                            "Error reading UDP socket: source={} error={}",
+                            source,
+                            e
+                        );
                         self.on_socket_error(&source, e);
                     }
                 }
@@ -430,14 +490,23 @@ impl datagram_pipe::Source for DatagramSource {
 impl datagram_pipe::Sink for DatagramSink {
     type Input = downstream::UdpDatagram;
 
-    async fn write(&mut self, datagram: downstream::UdpDatagram) -> io::Result<datagram_pipe::SendStatus> {
+    async fn write(
+        &mut self,
+        datagram: downstream::UdpDatagram,
+    ) -> io::Result<datagram_pipe::SendStatus> {
         let meta = forwarder::UdpDatagramMeta::from(&datagram.meta);
-        let socket = self.shared.associations.lock().unwrap()
+        let socket = self
+            .shared
+            .associations
+            .lock()
+            .unwrap()
             .get(&meta.source)
             .map(|x| x.socket.clone())
             .ok_or_else(|| io::Error::from(ErrorKind::NotFound))?;
 
-        socket.send_to(datagram.payload.as_ref(), meta.destination).await
+        socket
+            .send_to(datagram.payload.as_ref(), meta.destination)
+            .await
             .map(|_| datagram_pipe::SendStatus::Sent)
             .map_err(socks_to_io_error)
     }
@@ -446,12 +515,11 @@ impl datagram_pipe::Sink for DatagramSink {
 fn make_auth(auth: authentication::Source) -> Result<socks5_client::Authentication, String> {
     Ok(match auth {
         authentication::Source::Sni(x) => {
-            socks5_client::Authentication::UsernamePassword(
-                x.clone(), x
-            )
-        },
+            socks5_client::Authentication::UsernamePassword(x.clone(), x)
+        }
         authentication::Source::ProxyBasic(x) => {
-            let credentials = base64::engine::general_purpose::STANDARD.decode(x.as_ref())
+            let credentials = base64::engine::general_purpose::STANDARD
+                .decode(x.as_ref())
                 .map_err(|e| e.to_string())
                 .and_then(|x| String::from_utf8(x).map_err(|e| e.to_string()))?;
             let mut split = credentials.splitn(2, ':');
@@ -459,12 +527,13 @@ fn make_auth(auth: authentication::Source) -> Result<socks5_client::Authenticati
             socks5_client::Authentication::UsernamePassword(
                 Cow::Owned(String::from(split.next().unwrap())),
                 Cow::Owned(
-                    split.next()
+                    split
+                        .next()
                         .map(String::from)
-                        .ok_or_else(|| "Expected colon-separated credentials".to_string())?
+                        .ok_or_else(|| "Expected colon-separated credentials".to_string())?,
                 ),
             )
-        },
+        }
     })
 }
 
@@ -480,15 +549,17 @@ fn make_extended_auth<'a>(
     ];
 
     if let Some(user_agent) = user_agent {
-        values.push(
-            socks5_client::ExtendedAuthenticationValue::UserAgent(Cow::Borrowed(user_agent))
-        );
+        values.push(socks5_client::ExtendedAuthenticationValue::UserAgent(
+            Cow::Borrowed(user_agent),
+        ));
     }
 
     match auth {
-        authentication::Source::Sni(_) => values.push(socks5_client::ExtendedAuthenticationValue::SniAuth),
+        authentication::Source::Sni(_) => {
+            values.push(socks5_client::ExtendedAuthenticationValue::SniAuth)
+        }
         authentication::Source::ProxyBasic(x) => values.push(
-            socks5_client::ExtendedAuthenticationValue::BasicProxyAuth(x)
+            socks5_client::ExtendedAuthenticationValue::BasicProxyAuth(x),
         ),
     }
 
@@ -505,11 +576,11 @@ const fn socks_settings(settings: &Settings) -> &Socks5ForwarderSettings {
 fn socks_to_io_error(err: socks5_client::Error) -> io::Error {
     match err {
         socks5_client::Error::Io(e) => e,
-        socks5_client::Error::Protocol(e) => io::Error::new(
-            ErrorKind::Other, format!("SOCKS protocol error: {}", e)
-        ),
-        socks5_client::Error::Authentication(e) => io::Error::new(
-            ErrorKind::Other, format!("Authentication error: {}", e)
-        ),
+        socks5_client::Error::Protocol(e) => {
+            io::Error::new(ErrorKind::Other, format!("SOCKS protocol error: {}", e))
+        }
+        socks5_client::Error::Authentication(e) => {
+            io::Error::new(ErrorKind::Other, format!("Authentication error: {}", e))
+        }
     }
 }

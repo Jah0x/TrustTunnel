@@ -1,20 +1,20 @@
+use crate::http_codec::{RequestHeaders, ResponseHeaders};
+use crate::{http_codec, log_id, log_utils, pipe};
+use async_trait::async_trait;
+use bytes::{BufMut, Bytes, BytesMut};
 use std::collections::HashSet;
 use std::io;
 use std::io::ErrorKind;
-use async_trait::async_trait;
-use bytes::{BufMut, Bytes, BytesMut};
-use crate::{http_codec, log_id, log_utils, pipe};
-use crate::http_codec::{RequestHeaders, ResponseHeaders};
-
 
 const INITIAL_RESPONSE_HEADERS_BUFFER_SIZE: usize = 32;
 const MAX_RESPONSE_HEADERS_NUM: usize = 128;
 const ENCODED_CHUNK_SUFFIX: &str = "\r\n";
 
-
 /// Wrap the `stream` with a non-CONNECT request into a wrapper which forwards the request
 /// to a peer as a plain HTTP/1 one
-pub(crate) fn into_forwarded(stream: Box<dyn http_codec::Stream>) -> io::Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>)> {
+pub(crate) fn into_forwarded(
+    stream: Box<dyn http_codec::Stream>,
+) -> io::Result<(Box<dyn pipe::Source>, Box<dyn pipe::Sink>)> {
     let (request, respond) = stream.split();
     let method = request.request().method.clone();
     let version = request.request().version;
@@ -51,7 +51,6 @@ pub(crate) fn into_forwarded(stream: Box<dyn http_codec::Stream>) -> io::Result<
         }),
     ))
 }
-
 
 struct ForwardedStreamSource {
     state: SourceState,
@@ -129,7 +128,6 @@ enum SinkState {
     WaitingChunkSuffix(SinkWaitingChunkSuffix),
 }
 
-
 #[async_trait]
 impl pipe::Source for ForwardedStreamSource {
     fn id(&self) -> log_utils::IdChain<u64> {
@@ -202,8 +200,7 @@ impl ForwardedStreamSource {
         };
 
         match (result, &state.body_length) {
-            (pipe::Data::Chunk(mut bytes), BodyLength::Determined(n))
-            if state.sent_bytes < *n => {
+            (pipe::Data::Chunk(mut bytes), BodyLength::Determined(n)) if state.sent_bytes < *n => {
                 let to_send = std::cmp::min(bytes.len() as u64, n - state.sent_bytes);
                 state.sent_bytes += to_send;
                 Ok(pipe::Data::Chunk(bytes.split_to(to_send as usize)))
@@ -237,16 +234,18 @@ impl pipe::Sink for ForwardedStreamSink {
                 Err(e) if matches!(self.state, SinkState::WaitingResponse(_)) => {
                     match std::mem::replace(&mut self.state, SinkState::Idle) {
                         SinkState::WaitingResponse(x) => {
-                            let _ = x.respond.send_bad_response(http::StatusCode::BAD_GATEWAY, vec![]);
+                            let _ = x
+                                .respond
+                                .send_bad_response(http::StatusCode::BAD_GATEWAY, vec![]);
                         }
                         _ => unreachable!(),
                     }
                     Err(e)
                 }
                 x => x,
-            }
+            },
             SinkState::TransferringBodyNonEncoded(_) => self.on_non_encoded_chunk(data),
-            SinkState::WaitingChunkPrefix(_) =>  self.on_encoded_chunk_prefix(data),
+            SinkState::WaitingChunkPrefix(_) => self.on_encoded_chunk_prefix(data),
             SinkState::TransferringBodyChunked(_) => self.on_encoded_chunk(data),
             SinkState::WaitingChunkSuffix(_) => self.on_encoded_chunk_suffix(data),
         }
@@ -255,8 +254,9 @@ impl pipe::Sink for ForwardedStreamSink {
     fn eof(&mut self) -> io::Result<()> {
         match std::mem::replace(&mut self.state, SinkState::Idle) {
             SinkState::Idle => Ok(()),
-            SinkState::WaitingResponse(x) =>
-                x.respond.send_bad_response(http::StatusCode::BAD_GATEWAY, vec![]),
+            SinkState::WaitingResponse(x) => x
+                .respond
+                .send_bad_response(http::StatusCode::BAD_GATEWAY, vec![]),
             SinkState::TransferringBodyNonEncoded(mut x) => x.sink.eof(),
             SinkState::WaitingChunkPrefix(mut x) => x.sink.eof(),
             SinkState::TransferringBodyChunked(mut x) => x.sink.eof(),
@@ -271,7 +271,9 @@ impl pipe::Sink for ForwardedStreamSink {
         }
 
         match &mut self.state {
-            SinkState::Idle | SinkState::WaitingResponse(_) => Err(io::Error::new(ErrorKind::Other, "Invalid state")),
+            SinkState::Idle | SinkState::WaitingResponse(_) => {
+                Err(io::Error::new(ErrorKind::Other, "Invalid state"))
+            }
             SinkState::WaitingChunkPrefix(_) | SinkState::WaitingChunkSuffix(_) => Ok(()),
             SinkState::TransferringBodyNonEncoded(x) => x.sink.wait_writable().await,
             SinkState::TransferringBodyChunked(x) => x.sink.wait_writable().await,
@@ -314,7 +316,8 @@ impl ForwardedStreamSink {
         };
 
         let sink = state.respond.send_response(
-            response, matches!(body_length, Some(BodyLength::Determined(0)))
+            response,
+            matches!(body_length, Some(BodyLength::Determined(0))),
         )?;
 
         self.state = match body_length {
@@ -322,7 +325,7 @@ impl ForwardedStreamSink {
                 buffer: Default::default(),
                 sink: sink.into_pipe_sink(),
             }),
-            None | Some(BodyLength::Determined(_)) =>
+            None | Some(BodyLength::Determined(_)) => {
                 SinkState::TransferringBodyNonEncoded(SinkTransferringBodyNonEncoded {
                     sink: sink.into_pipe_sink(),
                     body_length: body_length.map(|x| match x {
@@ -330,7 +333,8 @@ impl ForwardedStreamSink {
                         BodyLength::Chunked => unreachable!(),
                     }),
                     sent_bytes: 0,
-                }),
+                })
+            }
         };
 
         self.fake_unsent = !tail.is_empty();
@@ -377,13 +381,12 @@ impl ForwardedStreamSink {
             _ => unreachable!(),
         };
 
-        let mut data =
-            if state.buffer.is_empty() {
-                data
-            } else {
-                state.buffer.extend_from_slice(&data);
-                std::mem::take(&mut state.buffer).freeze()
-            };
+        let mut data = if state.buffer.is_empty() {
+            data
+        } else {
+            state.buffer.extend_from_slice(&data);
+            std::mem::take(&mut state.buffer).freeze()
+        };
 
         let (chunk_size, tail) = match httparse::parse_chunk_size(&data) {
             Ok(httparse::Status::Complete((pos, chunk_size))) => {
@@ -394,9 +397,12 @@ impl ForwardedStreamSink {
                 state.buffer = BytesMut::from(data.as_ref());
                 return Ok(Bytes::new());
             }
-            Err(httparse::InvalidChunkSize) => return Err(io::Error::new(
-                ErrorKind::Other, "Invalid encoded chunk size"
-            )),
+            Err(httparse::InvalidChunkSize) => {
+                return Err(io::Error::new(
+                    ErrorKind::Other,
+                    "Invalid encoded chunk size",
+                ))
+            }
         };
 
         if chunk_size == 0 {
@@ -428,11 +434,22 @@ impl ForwardedStreamSink {
             _ => unreachable!(),
         };
 
-        let to_send = std::cmp::min(data.len() as u64, state.remaining_chunk_size.unwrap()) as usize;
+        let to_send =
+            std::cmp::min(data.len() as u64, state.remaining_chunk_size.unwrap()) as usize;
         let unsent = state.sink.write(data.slice(..to_send))?;
 
-        let remaining = state.remaining_chunk_size.take().unwrap().saturating_sub(to_send as u64);
-        log_id!(trace, self.id, "Encoded chunk: {} bytes (remaining {} bytes)", to_send, remaining);
+        let remaining = state
+            .remaining_chunk_size
+            .take()
+            .unwrap()
+            .saturating_sub(to_send as u64);
+        log_id!(
+            trace,
+            self.id,
+            "Encoded chunk: {} bytes (remaining {} bytes)",
+            to_send,
+            remaining
+        );
         if remaining > 0 {
             state.remaining_chunk_size = Some(remaining);
         } else {
@@ -453,17 +470,20 @@ impl ForwardedStreamSink {
             _ => unreachable!(),
         };
 
-        let suffix =
-            if state.buffer.is_empty() {
-                data.split_to(std::cmp::min(data.len(), ENCODED_CHUNK_SUFFIX.len()))
-            } else {
-                let to_read = std::cmp::min(data.len(), ENCODED_CHUNK_SUFFIX.len() - state.buffer.len());
-                state.buffer.extend_from_slice(&data.split_to(to_read));
-                std::mem::take(&mut state.buffer).freeze()
-            };
+        let suffix = if state.buffer.is_empty() {
+            data.split_to(std::cmp::min(data.len(), ENCODED_CHUNK_SUFFIX.len()))
+        } else {
+            let to_read =
+                std::cmp::min(data.len(), ENCODED_CHUNK_SUFFIX.len() - state.buffer.len());
+            state.buffer.extend_from_slice(&data.split_to(to_read));
+            std::mem::take(&mut state.buffer).freeze()
+        };
 
         if !ENCODED_CHUNK_SUFFIX.as_bytes().starts_with(&suffix) {
-            return Err(io::Error::new(ErrorKind::Other, "Invalid encoded chunk suffix"));
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "Invalid encoded chunk suffix",
+            ));
         }
 
         if suffix.len() < ENCODED_CHUNK_SUFFIX.len() {
@@ -471,7 +491,12 @@ impl ForwardedStreamSink {
             self.state = SinkState::WaitingChunkSuffix(state);
         } else if state.terminating_chunk {
             if !data.is_empty() {
-                log_id!(debug, self.id, "Dropping non-processed {} bytes coming after terminating encoded chunk", data.len());
+                log_id!(
+                    debug,
+                    self.id,
+                    "Dropping non-processed {} bytes coming after terminating encoded chunk",
+                    data.len()
+                );
             }
             data = Bytes::new();
             state.sink.eof()?;
@@ -488,17 +513,19 @@ impl ForwardedStreamSink {
 
 impl SinkWaitingResponse {
     fn parse_response(
-        &mut self, data: Bytes, log_id: &log_utils::IdChain<u64>
+        &mut self,
+        data: Bytes,
+        log_id: &log_utils::IdChain<u64>,
     ) -> io::Result<(Option<(ResponseHeaders, Option<BodyLength>)>, Bytes)> {
-        let mut data =
-            if self.headers_buffer.is_empty() {
-                data
-            } else {
-                self.headers_buffer.extend_from_slice(&data);
-                std::mem::take(&mut self.headers_buffer).freeze()
-            };
+        let mut data = if self.headers_buffer.is_empty() {
+            data
+        } else {
+            self.headers_buffer.extend_from_slice(&data);
+            std::mem::take(&mut self.headers_buffer).freeze()
+        };
 
-        let mut parse_headers_buffer = vec![httparse::EMPTY_HEADER; INITIAL_RESPONSE_HEADERS_BUFFER_SIZE];
+        let mut parse_headers_buffer =
+            vec![httparse::EMPTY_HEADER; INITIAL_RESPONSE_HEADERS_BUFFER_SIZE];
         loop {
             let mut response = httparse::Response::new(parse_headers_buffer.as_mut());
             match response.parse(data.as_ref()) {
@@ -510,34 +537,43 @@ impl SinkWaitingResponse {
                     self.headers_buffer = BytesMut::from(data.as_ref());
                     return Ok((None, Bytes::new()));
                 }
-                Err(httparse::Error::TooManyHeaders) if parse_headers_buffer.len() < MAX_RESPONSE_HEADERS_NUM =>
-                    parse_headers_buffer.resize(2 * parse_headers_buffer.len(), httparse::EMPTY_HEADER),
-                Err(e) => return Err(io::Error::new(
-                    ErrorKind::Other, format!("Failed to parse response: {}", e)
-                )),
+                Err(httparse::Error::TooManyHeaders)
+                    if parse_headers_buffer.len() < MAX_RESPONSE_HEADERS_NUM =>
+                {
+                    parse_headers_buffer
+                        .resize(2 * parse_headers_buffer.len(), httparse::EMPTY_HEADER)
+                }
+                Err(e) => {
+                    return Err(io::Error::new(
+                        ErrorKind::Other,
+                        format!("Failed to parse response: {}", e),
+                    ))
+                }
             }
         }
     }
 
-    fn convert_response(&self, response: httparse::Response)
-        -> io::Result<(ResponseHeaders, Option<BodyLength>)>
-    {
+    fn convert_response(
+        &self,
+        response: httparse::Response,
+    ) -> io::Result<(ResponseHeaders, Option<BodyLength>)> {
         let mut builder = http::response::Response::builder()
             .version(self.request_version)
             .status(response.code.unwrap());
         let mut body_length = None;
-        let mut drop_headers = HashSet::from(
-            ["proxy-connection", "keep-alive", "upgrade"].map(|h| h.to_string())
-        );
+        let mut drop_headers =
+            HashSet::from(["proxy-connection", "keep-alive", "upgrade"].map(|h| h.to_string()));
         for h in response.headers {
             match (h.name.to_ascii_lowercase().as_str(), self.request_version) {
                 (x, _) if drop_headers.contains(x) => (),
-                ("connection", _) => if let Ok(x) = std::str::from_utf8(h.value) {
-                    drop_headers.extend(
-                        x.split(',')
-                            .filter(|x| *x != "close")
-                            .map(|x| x.trim().to_lowercase())
-                    );
+                ("connection", _) => {
+                    if let Ok(x) = std::str::from_utf8(h.value) {
+                        drop_headers.extend(
+                            x.split(',')
+                                .filter(|x| *x != "close")
+                                .map(|x| x.trim().to_lowercase()),
+                        );
+                    }
                 }
                 ("transfer-encoding", http::Version::HTTP_2 | http::Version::HTTP_3) => {
                     if h.value == "chunked".as_bytes() {
@@ -550,36 +586,49 @@ impl SinkWaitingResponse {
                     if body_length.is_none() && x == "content-length" {
                         body_length = Some(BodyLength::Determined(
                             std::str::from_utf8(h.value)
-                                .map_err(|e| io::Error::new(
-                                    ErrorKind::Other,
-                                    format!("Invalid Content-Length header value: {:?}, error={}", h.value, e)
-                                ))?
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        ErrorKind::Other,
+                                        format!(
+                                            "Invalid Content-Length header value: {:?}, error={}",
+                                            h.value, e
+                                        ),
+                                    )
+                                })?
                                 .parse::<u64>()
-                                .map_err(|e| io::Error::new(
-                                    ErrorKind::Other,
-                                    format!("Invalid Content-Length header value: {:?}, error={}", h.value, e)
-                                ))?
+                                .map_err(|e| {
+                                    io::Error::new(
+                                        ErrorKind::Other,
+                                        format!(
+                                            "Invalid Content-Length header value: {:?}, error={}",
+                                            h.value, e
+                                        ),
+                                    )
+                                })?,
                         ));
                     }
                     builder = builder.header(h.name.trim_end(), h.value)
-                },
+                }
             }
         }
 
         if self.request_method == http::Method::HEAD
-            || response.code.map_or(false, |x| (100..200).contains(&x) || x == 204 || x == 304)
+            || response
+                .code
+                .map_or(false, |x| (100..200).contains(&x) || x == 204 || x == 304)
         {
             body_length = Some(BodyLength::Determined(0));
         }
 
-        let response = builder.body(())
+        let response = builder
+            .body(())
             .map_err(|e| io::Error::new(ErrorKind::Other, format!("Invalid response: {}", e)))?
-            .into_parts().0;
+            .into_parts()
+            .0;
 
         Ok((response, body_length))
     }
 }
-
 
 fn version_major_digit(v: http::Version) -> u32 {
     match v {
@@ -606,18 +655,25 @@ fn serialize_request(request: &RequestHeaders) -> io::Result<(Bytes, BodyLength)
             "{} {} HTTP/{}.{}\r\n",
             request.method.as_str(),
             if request.method != http::Method::OPTIONS {
-                request.uri.path_and_query().map_or(request.uri.path(), |x| x.as_str())
+                request
+                    .uri
+                    .path_and_query()
+                    .map_or(request.uri.path(), |x| x.as_str())
             } else {
                 "*"
             },
             version_major_digit(request.version),
             version_minor_digit(request.version),
-        ).as_bytes()
+        )
+        .as_bytes(),
     );
 
-    let target_host = request.uri.authority().ok_or_else(|| io::Error::new(
-        ErrorKind::Other, format!("Request URI lacks host name: {:?}", request.uri)
-    ))?;
+    let target_host = request.uri.authority().ok_or_else(|| {
+        io::Error::new(
+            ErrorKind::Other,
+            format!("Request URI lacks host name: {:?}", request.uri),
+        )
+    })?;
 
     let mut host_inserted = false;
     let mut body_length = None;
@@ -625,33 +681,49 @@ fn serialize_request(request: &RequestHeaders) -> io::Result<(Bytes, BodyLength)
         match name.as_str() {
             "proxy-authorization" => (),
             "proxy-connection" => (),
-            "host" => if !host_inserted {
-                host_inserted = true;
-                serialized.put("host: ".as_bytes());
-                serialized.put(target_host.as_str().as_bytes());
-                serialized.put("\r\n".as_bytes());
-            } else {
-                return Err(io::Error::new(
-                    ErrorKind::Other, "Request has multiple Host headers"
-                ));
+            "host" => {
+                if !host_inserted {
+                    host_inserted = true;
+                    serialized.put("host: ".as_bytes());
+                    serialized.put(target_host.as_str().as_bytes());
+                    serialized.put("\r\n".as_bytes());
+                } else {
+                    return Err(io::Error::new(
+                        ErrorKind::Other,
+                        "Request has multiple Host headers",
+                    ));
+                }
             }
             name => {
                 match (name, &body_length) {
-                    ("content-length", None) => body_length = Some(BodyLength::Determined(
-                        value.to_str()
-                            .map_err(|_| io::Error::new(
-                                ErrorKind::Other, "Invalid Content-Length header value"
-                            ))?
-                            .parse::<u64>()
-                            .map_err(|_| io::Error::new(
-                                ErrorKind::Other, "Invalid Content-Length header value"
-                            ))?
-                    )),
-                    ("content-length", Some(BodyLength::Determined(_))) => return Err(io::Error::new(
-                        ErrorKind::Other, "Request has multiple Content-Length headers"
-                    )),
-                    ("transfer-encoding", _) if value == "chunked" =>
-                        body_length = Some(BodyLength::Chunked),
+                    ("content-length", None) => {
+                        body_length = Some(BodyLength::Determined(
+                            value
+                                .to_str()
+                                .map_err(|_| {
+                                    io::Error::new(
+                                        ErrorKind::Other,
+                                        "Invalid Content-Length header value",
+                                    )
+                                })?
+                                .parse::<u64>()
+                                .map_err(|_| {
+                                    io::Error::new(
+                                        ErrorKind::Other,
+                                        "Invalid Content-Length header value",
+                                    )
+                                })?,
+                        ))
+                    }
+                    ("content-length", Some(BodyLength::Determined(_))) => {
+                        return Err(io::Error::new(
+                            ErrorKind::Other,
+                            "Request has multiple Content-Length headers",
+                        ))
+                    }
+                    ("transfer-encoding", _) if value == "chunked" => {
+                        body_length = Some(BodyLength::Chunked)
+                    }
                     _ => (),
                 }
 
@@ -679,5 +751,8 @@ fn serialize_request(request: &RequestHeaders) -> io::Result<(Bytes, BodyLength)
         })
     };
 
-    Ok((serialized.freeze(), body_length.unwrap_or(BodyLength::Determined(0))))
+    Ok((
+        serialized.freeze(),
+        body_length.unwrap_or(BodyLength::Determined(0)),
+    ))
 }

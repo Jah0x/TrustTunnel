@@ -1,5 +1,5 @@
-use std::sync::Arc;
 use crate::{http_codec, http_speedtest_handler, net_utils, settings, tls_demultiplexer};
+use std::sync::Arc;
 
 pub(crate) struct HttpDemux {
     core_settings: Arc<settings::Settings>,
@@ -7,9 +7,7 @@ pub(crate) struct HttpDemux {
 
 impl HttpDemux {
     pub fn new(core_settings: Arc<settings::Settings>) -> Self {
-        Self {
-            core_settings,
-        }
+        Self { core_settings }
     }
 
     pub fn select(
@@ -30,16 +28,25 @@ impl HttpDemux {
 
     fn check_ping(&self, request: &http_codec::RequestHeaders) -> bool {
         static MARKER_HEADERS: [(http::HeaderName, http::HeaderValue); 2] = [
-            (http::HeaderName::from_static("x-ping"), http::HeaderValue::from_static("1")),
-            (http::HeaderName::from_static("sec-fetch-mode"), http::HeaderValue::from_static("navigate")),
+            (
+                http::HeaderName::from_static("x-ping"),
+                http::HeaderValue::from_static("1"),
+            ),
+            (
+                http::HeaderName::from_static("sec-fetch-mode"),
+                http::HeaderValue::from_static("navigate"),
+            ),
         ];
 
-        MARKER_HEADERS.iter()
+        MARKER_HEADERS
+            .iter()
             .any(|(name, value)| request.headers.get(name) == Some(value))
     }
 
     fn check_speedtest(&self, request: &http_codec::RequestHeaders) -> bool {
-        request.uri.path()
+        request
+            .uri
+            .path()
             .strip_prefix('/')
             .and_then(|x| x.strip_prefix(http_speedtest_handler::SKIPPABLE_PATH_SEGMENT))
             .and_then(|x| x.strip_prefix('/'))
@@ -47,17 +54,23 @@ impl HttpDemux {
     }
 
     fn check_reverse_proxy(
-        &self, protocol: tls_demultiplexer::Protocol, request: &http_codec::RequestHeaders,
+        &self,
+        protocol: tls_demultiplexer::Protocol,
+        request: &http_codec::RequestHeaders,
     ) -> bool {
         match protocol {
-            tls_demultiplexer::Protocol::Http1 => if !request.headers.contains_key(http::header::UPGRADE) {
-                return false;
+            tls_demultiplexer::Protocol::Http1 => {
+                if !request.headers.contains_key(http::header::UPGRADE) {
+                    return false;
+                }
             }
             tls_demultiplexer::Protocol::Http3 => (),
             _ => return false,
         }
 
-        self.core_settings.reverse_proxy.as_ref()
+        self.core_settings
+            .reverse_proxy
+            .as_ref()
             .map(|x| x.path_mask.as_str())
             .map_or(false, |x| request.uri.path().starts_with(x))
     }

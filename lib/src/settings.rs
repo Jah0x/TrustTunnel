@@ -6,12 +6,12 @@ use std::net::{Ipv4Addr, SocketAddr, ToSocketAddrs};
 use std::path::Path;
 use std::time::Duration;
 
+use crate::{authentication, rules, utils};
+use authentication::registry_based::Client;
 #[cfg(feature = "rt_doc")]
 use macros::{Getter, RuntimeDoc};
 use serde::{Deserialize, Serialize};
 use toml_edit::{Document, Item};
-use authentication::registry_based::Client;
-use crate::{authentication, utils, rules};
 
 pub type Socks5BuilderResult<T> = Result<T, Socks5Error>;
 
@@ -74,28 +74,43 @@ pub struct Settings {
     /// Timeout of an incoming TLS handshake
     #[serde(default = "Settings::default_tls_handshake_timeout")]
     #[serde(rename = "tls_handshake_timeout_secs")]
-    #[serde(deserialize_with = "deserialize_duration_secs", serialize_with = "serialize_duration_secs")]
+    #[serde(
+        deserialize_with = "deserialize_duration_secs",
+        serialize_with = "serialize_duration_secs"
+    )]
     pub(crate) tls_handshake_timeout: Duration,
     /// Timeout of a client listener
     #[serde(default = "Settings::default_client_listener_timeout")]
     #[serde(rename = "client_listener_timeout_secs")]
-    #[serde(deserialize_with = "deserialize_duration_secs", serialize_with = "serialize_duration_secs")]
+    #[serde(
+        deserialize_with = "deserialize_duration_secs",
+        serialize_with = "serialize_duration_secs"
+    )]
     pub(crate) client_listener_timeout: Duration,
     /// Timeout of outgoing connection establishment.
     /// For example, it is related to client's connection requests.
     #[serde(default = "Settings::default_connection_establishment_timeout")]
     #[serde(rename = "connection_establishment_timeout_secs")]
-    #[serde(deserialize_with = "deserialize_duration_secs", serialize_with = "serialize_duration_secs")]
+    #[serde(
+        deserialize_with = "deserialize_duration_secs",
+        serialize_with = "serialize_duration_secs"
+    )]
     pub(crate) connection_establishment_timeout: Duration,
     /// Idle timeout of tunneled TCP connections
     #[serde(default = "Settings::default_tcp_connections_timeout")]
     #[serde(rename = "tcp_connections_timeout_secs")]
-    #[serde(deserialize_with = "deserialize_duration_secs", serialize_with = "serialize_duration_secs")]
+    #[serde(
+        deserialize_with = "deserialize_duration_secs",
+        serialize_with = "serialize_duration_secs"
+    )]
     pub(crate) tcp_connections_timeout: Duration,
     /// Timeout of tunneled UDP "connections"
     #[serde(default = "Settings::default_udp_connections_timeout")]
     #[serde(rename = "udp_connections_timeout_secs")]
-    #[serde(deserialize_with = "deserialize_duration_secs", serialize_with = "serialize_duration_secs")]
+    #[serde(
+        deserialize_with = "deserialize_duration_secs",
+        serialize_with = "serialize_duration_secs"
+    )]
     pub(crate) udp_connections_timeout: Duration,
     /// The set of connection forwarder settings
     #[serde(default)]
@@ -288,7 +303,10 @@ pub struct IcmpSettings {
     /// Timeout of tunneled ICMP requests
     #[serde(default = "IcmpSettings::default_request_timeout")]
     #[serde(rename = "request_timeout_secs")]
-    #[serde(deserialize_with = "deserialize_duration_secs", serialize_with = "serialize_duration_secs")]
+    #[serde(
+        deserialize_with = "deserialize_duration_secs",
+        serialize_with = "serialize_duration_secs"
+    )]
     pub(crate) request_timeout: Duration,
     /// The capacity of the ICMP multiplexer received messages queue.
     /// Decreasing it may cause packet dropping in case the multiplexer cannot keep up the pace.
@@ -308,7 +326,10 @@ pub struct MetricsSettings {
     /// Timeout of a metrics request
     #[serde(default = "MetricsSettings::default_request_timeout")]
     #[serde(rename = "request_timeout_secs")]
-    #[serde(deserialize_with = "deserialize_duration_secs", serialize_with = "serialize_duration_secs")]
+    #[serde(
+        deserialize_with = "deserialize_duration_secs",
+        serialize_with = "serialize_duration_secs"
+    )]
     pub(crate) request_timeout: Duration,
 }
 
@@ -439,7 +460,10 @@ impl Settings {
             return Err(ValidationError::ListenAddressNotSet);
         }
 
-        self.reverse_proxy.as_ref().map(ReverseProxySettings::validate).transpose()?;
+        self.reverse_proxy
+            .as_ref()
+            .map(ReverseProxySettings::validate)
+            .transpose()?;
 
         if self.listen_protocols.http1.is_none()
             && self.listen_protocols.http2.is_none()
@@ -521,20 +545,24 @@ impl TlsHostsSettings {
         self.built
     }
 
-    fn validate_tls_hosts<'a, Iter>(hosts: Iter, mut unique_hosts: HashSet<&'a str>)
-                                    -> Result<HashSet<&'a str>, String>
-        where Iter: Iterator<Item=&'a TlsHostInfo>
+    fn validate_tls_hosts<'a, Iter>(
+        hosts: Iter,
+        mut unique_hosts: HashSet<&'a str>,
+    ) -> Result<HashSet<&'a str>, String>
+    where
+        Iter: Iterator<Item = &'a TlsHostInfo>,
     {
         for h in hosts {
-            utils::load_certs(&h.cert_chain_path)
-                .map_err(|e| format!(
-                    "Invalid cert chain: path='{}', error='{}'", h.cert_chain_path, e
-                ))?;
+            utils::load_certs(&h.cert_chain_path).map_err(|e| {
+                format!(
+                    "Invalid cert chain: path='{}', error='{}'",
+                    h.cert_chain_path, e
+                )
+            })?;
 
-            utils::load_private_key(&h.private_key_path)
-                .map_err(|e| format!(
-                    "Invalid key: path='{}', error='{}'", h.private_key_path, e
-                ))?;
+            utils::load_private_key(&h.private_key_path).map_err(|e| {
+                format!("Invalid key: path='{}', error='{}'", h.private_key_path, e)
+            })?;
 
             if !unique_hosts.insert(&h.hostname) {
                 return Err(format!("Hostname must be unique: {}", h.hostname));
@@ -669,11 +697,16 @@ impl ReverseProxySettings {
 
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.server_address.port() == 0 {
-            return Err(ValidationError::ReverseProxy("Server address is not set".to_string()));
+            return Err(ValidationError::ReverseProxy(
+                "Server address is not set".to_string(),
+            ));
         }
 
         if self.path_mask.is_empty() || !self.path_mask.starts_with('/') {
-            return Err(ValidationError::ReverseProxy(format!("Invalid path mask: {}", self.path_mask)));
+            return Err(ValidationError::ReverseProxy(format!(
+                "Invalid path mask: {}",
+                self.path_mask
+            )));
         }
 
         Ok(())
@@ -690,7 +723,8 @@ impl IcmpSettings {
             "eth0"
         } else {
             "en0"
-        }.into()
+        }
+        .into()
     }
 
     pub fn default_request_timeout() -> Duration {
@@ -731,10 +765,12 @@ impl SettingsBuilder {
             settings: Settings {
                 listen_address: Settings::default_listen_address(),
                 ipv6_available: Settings::default_ipv6_available(),
-                allow_private_network_connections: Settings::default_allow_private_network_connections(),
+                allow_private_network_connections:
+                    Settings::default_allow_private_network_connections(),
                 tls_handshake_timeout: Settings::default_tls_handshake_timeout(),
                 client_listener_timeout: Settings::default_client_listener_timeout(),
-                connection_establishment_timeout: Settings::default_connection_establishment_timeout(),
+                connection_establishment_timeout:
+                    Settings::default_connection_establishment_timeout(),
                 tcp_connections_timeout: Settings::default_tcp_connections_timeout(),
                 udp_connections_timeout: Settings::default_udp_connections_timeout(),
                 forward_protocol: Default::default(),
@@ -758,7 +794,8 @@ impl SettingsBuilder {
 
     /// Set the address to listen on
     pub fn listen_address<A: ToSocketAddrs>(mut self, addr: A) -> io::Result<Self> {
-        self.settings.listen_address = addr.to_socket_addrs()?
+        self.settings.listen_address = addr
+            .to_socket_addrs()?
             .next()
             .ok_or_else(|| io::Error::new(ErrorKind::Other, "Address is parsed to empty list"))?;
         Ok(self)
@@ -936,7 +973,8 @@ impl Socks5ForwarderSettingsBuilder {
 
     /// Set the SOCKS proxy address
     pub fn server_address<A: ToSocketAddrs>(mut self, v: A) -> io::Result<Self> {
-        self.settings.address = v.to_socket_addrs()?
+        self.settings.address = v
+            .to_socket_addrs()?
             .next()
             .ok_or_else(|| io::Error::new(ErrorKind::Other, "Address is parsed to empty list"))?;
         Ok(self)
@@ -969,7 +1007,8 @@ impl Http2SettingsBuilder {
     fn new() -> Self {
         Self {
             settings: Http2Settings {
-                initial_connection_window_size: Http2Settings::default_initial_connection_window_size(),
+                initial_connection_window_size:
+                    Http2Settings::default_initial_connection_window_size(),
                 initial_stream_window_size: Http2Settings::default_initial_stream_window_size(),
                 max_concurrent_streams: Http2Settings::default_max_concurrent_streams(),
                 max_frame_size: Http2Settings::default_max_frame_size(),
@@ -1021,8 +1060,10 @@ impl QuicSettingsBuilder {
                 recv_udp_payload_size: QuicSettings::default_recv_udp_payload_size(),
                 send_udp_payload_size: QuicSettings::default_send_udp_payload_size(),
                 initial_max_data: QuicSettings::default_initial_max_data(),
-                initial_max_stream_data_bidi_local: QuicSettings::default_initial_max_stream_data_bidi_local(),
-                initial_max_stream_data_bidi_remote: QuicSettings::default_initial_max_stream_data_bidi_remote(),
+                initial_max_stream_data_bidi_local:
+                    QuicSettings::default_initial_max_stream_data_bidi_local(),
+                initial_max_stream_data_bidi_remote:
+                    QuicSettings::default_initial_max_stream_data_bidi_remote(),
                 initial_max_stream_data_uni: QuicSettings::default_initial_max_stream_data_uni(),
                 initial_max_streams_bidi: QuicSettings::default_initial_max_streams_bidi(),
                 initial_max_streams_uni: QuicSettings::default_initial_max_streams_uni(),
@@ -1031,7 +1072,7 @@ impl QuicSettingsBuilder {
                 disable_active_migration: QuicSettings::default_disable_active_migration(),
                 enable_early_data: QuicSettings::default_enable_early_data(),
                 message_queue_capacity: QuicSettings::default_message_queue_capacity(),
-            }
+            },
         }
     }
 
@@ -1126,7 +1167,7 @@ impl ReverseProxySettingsBuilder {
                 server_address: (Ipv4Addr::UNSPECIFIED, 0).into(),
                 path_mask: Default::default(),
                 h3_backward_compatibility: false,
-            }
+            },
         }
     }
 
@@ -1138,7 +1179,8 @@ impl ReverseProxySettingsBuilder {
 
     /// Set the proxy server address
     pub fn server_address<A: ToSocketAddrs>(mut self, v: A) -> io::Result<Self> {
-        self.settings.server_address = v.to_socket_addrs()?
+        self.settings.server_address = v
+            .to_socket_addrs()?
             .next()
             .ok_or_else(|| io::Error::new(ErrorKind::Other, "Parsed address to empty list"))?;
         Ok(self)
@@ -1205,7 +1247,8 @@ impl MetricsSettingsBuilder {
 
     /// Set the address to listen on for settings export requests
     pub fn listen_address<A: ToSocketAddrs>(mut self, addr: A) -> io::Result<Self> {
-        self.settings.address = addr.to_socket_addrs()?
+        self.settings.address = addr
+            .to_socket_addrs()?
             .next()
             .ok_or_else(|| io::Error::new(ErrorKind::Other, "Address is parsed to empty list"))?;
         Ok(self)
@@ -1232,13 +1275,13 @@ impl Default for ForwardProtocolSettings {
 fn validate_file_path(path: &str) -> io::Result<()> {
     match std::fs::metadata(Path::new(path))? {
         m if m.is_file() => Ok(()),
-        _ => Err(io::Error::new(ErrorKind::Other, "Not a file"))
+        _ => Err(io::Error::new(ErrorKind::Other, "Not a file")),
     }
 }
 
 fn deserialize_duration_secs<'de, D>(deserializer: D) -> Result<Duration, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
+where
+    D: serde::de::Deserializer<'de>,
 {
     struct Visitor;
 
@@ -1250,12 +1293,13 @@ fn deserialize_duration_secs<'de, D>(deserializer: D) -> Result<Duration, D::Err
         }
 
         // toml parser library converts unsigned integers to signed
-        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> where E: serde::de::Error {
-            (v >= 0).then_some(v as u64)
-                .ok_or_else(|| E::invalid_type(
-                    serde::de::Unexpected::Signed(v),
-                    &Visitor {},
-                ))
+        fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            (v >= 0)
+                .then_some(v as u64)
+                .ok_or_else(|| E::invalid_type(serde::de::Unexpected::Signed(v), &Visitor {}))
         }
     }
 
@@ -1264,15 +1308,15 @@ fn deserialize_duration_secs<'de, D>(deserializer: D) -> Result<Duration, D::Err
 }
 
 fn serialize_duration_secs<S>(x: &Duration, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::ser::Serializer,
+where
+    S: serde::ser::Serializer,
 {
     serializer.serialize_u64(x.as_secs())
 }
 
 fn deserialize_file_path<'de, D>(deserializer: D) -> Result<String, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
+where
+    D: serde::de::Deserializer<'de>,
 {
     struct Visitor;
 
@@ -1283,13 +1327,16 @@ fn deserialize_file_path<'de, D>(deserializer: D) -> Result<String, D::Error>
             write!(formatter, "a path to an existent accessible file")
         }
 
-        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> where E: serde::de::Error {
-            validate_file_path(v)
-                .map(|_| v.to_string())
-                .map_err(|e| E::invalid_value(
+        fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>
+        where
+            E: serde::de::Error,
+        {
+            validate_file_path(v).map(|_| v.to_string()).map_err(|e| {
+                E::invalid_value(
                     serde::de::Unexpected::Other(&format!("path={} error={}", v, e)),
                     &Visitor {},
-                ))
+                )
+            })
         }
     }
 
@@ -1297,41 +1344,48 @@ fn deserialize_file_path<'de, D>(deserializer: D) -> Result<String, D::Error>
 }
 
 fn deserialize_clients<'de, D>(deserializer: D) -> Result<Vec<Client>, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
+where
+    D: serde::de::Deserializer<'de>,
 {
     let path = deserialize_file_path(deserializer)?;
 
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| serde::de::Error::invalid_value(
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        serde::de::Error::invalid_value(
             serde::de::Unexpected::Other(&format!("Couldn't read file: path={} error={}", path, e)),
             &"A readable file",
-        ))?;
+        )
+    })?;
 
-    let clients: Document = content.parse()
-        .map_err(|e| serde::de::Error::invalid_value(
-            serde::de::Unexpected::Other(&format!("Couldn't parse file: path={} error={}", path, e)),
+    let clients: Document = content.parse().map_err(|e| {
+        serde::de::Error::invalid_value(
+            serde::de::Unexpected::Other(&format!(
+                "Couldn't parse file: path={} error={}",
+                path, e
+            )),
             &"A TOML-formatted file",
-        ))?;
+        )
+    })?;
 
-    let res = clients.get("client")
+    let res = clients
+        .get("client")
         .and_then(Item::as_array_of_tables)
         .ok_or(serde::de::Error::invalid_value(
             serde::de::Unexpected::Other("Not an array of clients"),
             &"An array of clients",
         ))?
         .iter()
-        .map(|x| (Client {
+        .map(|x| Client {
             username: demangle_toml_string(x["username"].to_string()),
             password: demangle_toml_string(x["password"].to_string()),
-        })).collect();
+        })
+        .collect();
 
     Ok(res)
 }
 
 fn deserialize_rules<'de, D>(deserializer: D) -> Result<Option<rules::RulesEngine>, D::Error>
-    where
-        D: serde::de::Deserializer<'de>,
+where
+    D: serde::de::Deserializer<'de>,
 {
     let path = match deserialize_file_path(deserializer) {
         Ok(path) => path,
@@ -1345,7 +1399,10 @@ fn deserialize_rules<'de, D>(deserializer: D) -> Result<Option<rules::RulesEngin
         Ok(content) => content,
         Err(e) => {
             // Log warning but don't fail - default to allow all
-            eprintln!("Warning: Could not read rules file '{}': {}. Defaulting to allow all connections.", path, e);
+            eprintln!(
+                "Warning: Could not read rules file '{}': {}. Defaulting to allow all connections.",
+                path, e
+            );
             return Ok(Some(rules::RulesEngine::default_allow()));
         }
     };
@@ -1363,22 +1420,25 @@ fn deserialize_rules<'de, D>(deserializer: D) -> Result<Option<rules::RulesEngin
             let rules: Vec<rules::Rule> = rules_array
                 .iter()
                 .filter_map(|rule_table| {
-                    let cidr = rule_table.get("cidr")
+                    let cidr = rule_table
+                        .get("cidr")
                         .and_then(Item::as_str)
                         .map(|s| s.to_string());
-                    
-                    let client_random_prefix = rule_table.get("client_random_prefix")
+
+                    let client_random_prefix = rule_table
+                        .get("client_random_prefix")
                         .and_then(Item::as_str)
                         .map(|s| s.to_string());
-                    
-                    let action = rule_table.get("action")
+
+                    let action = rule_table
+                        .get("action")
                         .and_then(Item::as_str)
                         .and_then(|s| match s {
                             "allow" => Some(rules::RuleAction::Allow),
                             "deny" => Some(rules::RuleAction::Deny),
                             _ => None,
                         })?;
-                    
+
                     Some(rules::Rule {
                         cidr,
                         client_random_prefix,
@@ -1386,7 +1446,7 @@ fn deserialize_rules<'de, D>(deserializer: D) -> Result<Option<rules::RulesEngin
                     })
                 })
                 .collect();
-            
+
             rules::RulesConfig { rule: rules }
         }
         None => {
@@ -1399,7 +1459,5 @@ fn deserialize_rules<'de, D>(deserializer: D) -> Result<Option<rules::RulesEngin
 }
 
 fn demangle_toml_string(x: String) -> String {
-    x.replace('"', "")
-        .trim()
-        .to_string()
+    x.replace('"', "").trim().to_string()
 }

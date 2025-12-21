@@ -15,6 +15,10 @@ DOCKER_ENDPOINT_CONFIG_DIR = config
 LISTEN_ADDRESS ?= 0.0.0.0
 LISTEN_PORT ?= 443
 
+.PHONY: init
+## Initialize the development environment (git hooks, etc.)
+init:
+	git config core.hooksPath ./scripts/hooks
 
 .PHONY: endpoint/build-wizard
 ## Build the setup wizard
@@ -54,10 +58,26 @@ endpoint/gen_client_config:
 endpoint/clean:
 	cargo clean
 
+.PHONY: lint
+lint: lint-md lint-rust
+
 .PHONY: lint-md
 ## Lint markdown files.
 ## `markdownlint-cli` should be installed:
 ##    macOS: `brew install markdownlint-cli`
 ##    Linux: `npm install -g markdownlint-cli`
 lint-md:
-	markdownlint README.md DEVELOPMENT.md
+	markdownlint .
+
+.PHONY: lint-rust
+## Check Rust code formatting with rustfmt.
+## `rustfmt` should be installed:
+##    rustup component add rustfmt
+lint-rust:
+	cargo fmt --all -- --check
+
+.PHONY: test
+test: test-rust
+
+test-rust:
+	cargo test --workspace

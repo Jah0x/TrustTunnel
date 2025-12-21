@@ -1,6 +1,6 @@
 use proc_macro::TokenStream;
-use std::iter;
 use quote::{format_ident, quote};
+use std::iter;
 use syn::{Attribute, Data, DataEnum, DataStruct, DeriveInput, Fields, Lit, Meta, MetaNameValue};
 
 #[cfg(target_family = "unix")]
@@ -12,21 +12,29 @@ pub(crate) fn derive(input: TokenStream) -> TokenStream {
     let ast: DeriveInput = syn::parse(input).unwrap();
 
     let docs = match &ast.data {
-        Data::Struct(DataStruct { fields: Fields::Named(fields), .. }) => {
-            fields.named.iter()
-                .filter_map(|field| field.ident.clone()
-                    .zip(Some(collect_docs(field.attrs.iter()))))
-                .collect::<Vec<_>>()
-        }
+        Data::Struct(DataStruct {
+            fields: Fields::Named(fields),
+            ..
+        }) => fields
+            .named
+            .iter()
+            .filter_map(|field| {
+                field
+                    .ident
+                    .clone()
+                    .zip(Some(collect_docs(field.attrs.iter())))
+            })
+            .collect::<Vec<_>>(),
         Data::Struct(_) => Default::default(),
-        Data::Enum(DataEnum { variants, .. }) => {
-            variants.iter()
-                .map(|variant| (
+        Data::Enum(DataEnum { variants, .. }) => variants
+            .iter()
+            .map(|variant| {
+                (
                     format_ident!("{}", variant.ident.to_string().to_lowercase()),
-                    collect_docs(variant.attrs.iter())
-                ))
-                .collect::<Vec<_>>()
-        }
+                    collect_docs(variant.attrs.iter()),
+                )
+            })
+            .collect::<Vec<_>>(),
         _ => panic!("`RuntimeDoc` has to be used only with structs or enums"),
     };
 
@@ -59,17 +67,16 @@ pub(crate) fn derive(input: TokenStream) -> TokenStream {
 }
 
 fn collect_docs<'a, I>(attrs: I) -> String
-    where I: Iterator<Item=&'a Attribute>
+where
+    I: Iterator<Item = &'a Attribute>,
 {
     attrs
         .filter_map(|attr| attr.parse_meta().ok())
         .filter(|meta| meta.path().is_ident("doc"))
         .filter_map(|meta| match meta {
-            Meta::NameValue(
-                MetaNameValue {
-                    lit: Lit::Str(lit), ..
-                }
-            ) => Some(lit.value().trim().to_string()),
+            Meta::NameValue(MetaNameValue {
+                lit: Lit::Str(lit), ..
+            }) => Some(lit.value().trim().to_string()),
             _ => None,
         })
         .filter(|doc| !doc.is_empty())

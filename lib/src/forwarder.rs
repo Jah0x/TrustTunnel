@@ -1,12 +1,11 @@
+use crate::net_utils::TcpDestination;
+use crate::{authentication, datagram_pipe, downstream, icmp_utils, log_utils, pipe, tunnel};
+use async_trait::async_trait;
+use bytes::Bytes;
 use std::fmt::{Debug, Formatter};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use async_trait::async_trait;
-use bytes::Bytes;
-use crate::{authentication, datagram_pipe, downstream, icmp_utils, log_utils, pipe, tunnel};
-use crate::net_utils::TcpDestination;
-
 
 #[derive(Debug, Hash, Eq, PartialEq, Copy, Clone)]
 pub(crate) struct UdpDatagramMeta {
@@ -121,16 +120,19 @@ pub(crate) trait Forwarder: Send {
 
     /// Create an ICMP datagram multiplexer
     fn make_icmp_datagram_multiplexer(
-        &self, id: log_utils::IdChain<u64>
-    ) -> io::Result<Option<(
-        Box<dyn datagram_pipe::Source<Output = IcmpDatagram>>,
-        Box<dyn datagram_pipe::Sink<Input = downstream::IcmpDatagram>>,
-    )>>;
+        &self,
+        id: log_utils::IdChain<u64>,
+    ) -> io::Result<
+        Option<(
+            Box<dyn datagram_pipe::Source<Output = IcmpDatagram>>,
+            Box<dyn datagram_pipe::Sink<Input = downstream::IcmpDatagram>>,
+        )>,
+    >;
 }
 
 impl UdpDatagramMeta {
     pub fn reversed(&self) -> Self {
-        Self{
+        Self {
             source: self.destination,
             destination: self.source,
         }
@@ -139,7 +141,7 @@ impl UdpDatagramMeta {
 
 impl From<&downstream::UdpDatagramMeta> for UdpDatagramMeta {
     fn from(x: &downstream::UdpDatagramMeta) -> Self {
-        Self{
+        Self {
             source: x.source,
             destination: x.destination,
         }

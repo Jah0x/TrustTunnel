@@ -1,8 +1,7 @@
+use crate::net_utils;
+use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crate::net_utils;
-
 
 const TYPE_SIZE: usize = 1;
 const CODE_SIZE: usize = 1;
@@ -12,9 +11,10 @@ const ICMP_SEQNO_SIZE: usize = 2;
 /// The meaning of the last 4 bytes depends on the type, but they are always present
 /// in a message
 const ICMP_MIN_COMMON_HEADER_SIZE: usize = TYPE_SIZE + CODE_SIZE + CHECKSUM_SIZE + 4;
-const ICMP_V4_MIN_MATCHING_DATA_SIZE: usize = net_utils::MIN_IPV4_HEADER_SIZE + ICMP_MIN_COMMON_HEADER_SIZE;
-const ECHO_HEADER_SIZE: usize = TYPE_SIZE + CODE_SIZE + CHECKSUM_SIZE + ICMP_ID_SIZE + ICMP_SEQNO_SIZE;
-
+const ICMP_V4_MIN_MATCHING_DATA_SIZE: usize =
+    net_utils::MIN_IPV4_HEADER_SIZE + ICMP_MIN_COMMON_HEADER_SIZE;
+const ECHO_HEADER_SIZE: usize =
+    TYPE_SIZE + CODE_SIZE + CHECKSUM_SIZE + ICMP_ID_SIZE + ICMP_SEQNO_SIZE;
 
 #[derive(Debug, Clone)]
 pub(crate) enum Message {
@@ -59,8 +59,7 @@ impl Message {
             Message::V4(v4::Message::Echo(x))
             | Message::V4(v4::Message::EchoReply(x))
             | Message::V6(v6::Message::EchoRequest(x))
-            | Message::V6(v6::Message::EchoReply(x))
-            => Some(x),
+            | Message::V6(v6::Message::EchoReply(x)) => Some(x),
             _ => None,
         }
     }
@@ -109,9 +108,7 @@ impl Eq for Echo {}
 
 impl PartialEq for Echo {
     fn eq(&self, other: &Self) -> bool {
-        if self.identifier != other.identifier
-            || self.sequence_number != other.sequence_number
-        {
+        if self.identifier != other.identifier || self.sequence_number != other.sequence_number {
             return false;
         }
 
@@ -161,27 +158,31 @@ enum LengthCheck {
 
 macro_rules! deserialize_packet {
     ($func:ident, $packet:ident, $length_check:expr, $out_type:ident) => {
-        match ($length_check, 1 + $packet.len()) { // 1 is for message type extracted earlier
+        match ($length_check, 1 + $packet.len()) {
+            // 1 is for message type extracted earlier
             (LengthCheck::Exact(n), m) if n != m => Err(super::DeserializeError::InvalidLength(
-                format!("Expected length: {}, packet length: {}", n, m)
+                format!("Expected length: {}, packet length: {}", n, m),
             )),
-            (LengthCheck::LowerBound(n), m) if m < n => Err(super::DeserializeError::InvalidLength(
-                format!("Expected length at least: {}, packet length: {}", n, m)
-            )),
+            (LengthCheck::LowerBound(n), m) if m < n => {
+                Err(super::DeserializeError::InvalidLength(format!(
+                    "Expected length at least: {}, packet length: {}",
+                    n, m
+                )))
+            }
             _ => {
                 let code = $packet.get_u8();
                 // todo: verify checksum
                 Self::$func(code, $packet.split_off(super::CHECKSUM_SIZE)).map(Message::$out_type)
             }
         }
-    }
+    };
 }
 
 pub(crate) mod v4 {
-    use bytes::{Buf, Bytes};
+    use super::LengthCheck;
     use crate::icmp_utils::ICMP_MIN_COMMON_HEADER_SIZE;
     use crate::net_utils;
-    use super::LengthCheck;
+    use bytes::{Buf, Bytes};
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) struct TypeId(pub u8);
@@ -370,10 +371,11 @@ pub(crate) mod v4 {
                     Message::SourceQuench(x) => x.data.len(),
                     Message::Redirect(x) => x.data.len(),
                     Message::Echo(x) | Message::EchoReply(x) => x.data.len(),
-                    Message::Timestamp(x) | Message::TimestampReply(x) =>
+                    Message::Timestamp(x) | Message::TimestampReply(x) => {
                         std::mem::size_of_val(&x.originate_timestamp)
                             + std::mem::size_of_val(&x.receive_timestamp)
-                            + std::mem::size_of_val(&x.transmit_timestamp),
+                            + std::mem::size_of_val(&x.transmit_timestamp)
+                    }
                     Message::InformationRequest(_) | Message::InformationReply(_) => 0,
                 }
         }
@@ -396,7 +398,12 @@ pub(crate) mod v4 {
             {
                 return None;
             }
-            match deserialize_packet!(parse_echo, payload, LengthCheck::LowerBound(super::ECHO_HEADER_SIZE), Echo) {
+            match deserialize_packet!(
+                parse_echo,
+                payload,
+                LengthCheck::LowerBound(super::ECHO_HEADER_SIZE),
+                Echo
+            ) {
                 Ok(Message::Echo(x)) => Some(x),
                 _ => None,
             }
@@ -411,32 +418,85 @@ pub(crate) mod v4 {
 
         pub fn deserialize(mut packet: Bytes) -> super::DeserializeResult<Self> {
             if packet.is_empty() {
-                return Err(super::DeserializeError::InvalidLength("Empty packet".to_string()));
+                return Err(super::DeserializeError::InvalidLength(
+                    "Empty packet".to_string(),
+                ));
             }
 
             match TypeId(packet.get_u8()) {
-                TypeId::ECHO_REPLY =>
-                    deserialize_packet!(parse_echo, packet, LengthCheck::LowerBound(super::ECHO_HEADER_SIZE), EchoReply),
-                TypeId::DESTINATION_UNREACHABLE =>
-                    deserialize_packet!(parse_destination_unreachable, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE), DestinationUnreachable),
-                TypeId::SOURCE_QUENCH =>
-                    deserialize_packet!(parse_source_quench, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE), SourceQuench),
-                TypeId::REDIRECT =>
-                    deserialize_packet!(parse_redirect, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE), Redirect),
-                TypeId::ECHO =>
-                    deserialize_packet!(parse_echo, packet, LengthCheck::LowerBound(super::ECHO_HEADER_SIZE), Echo),
-                TypeId::TIME_EXCEEDED =>
-                    deserialize_packet!(parse_time_exceeded, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE), TimeExceeded),
-                TypeId::PARAMETER_PROBLEM =>
-                    deserialize_packet!(parse_parameter_problem, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE), ParameterProblem),
-                TypeId::TIMESTAMP =>
-                    deserialize_packet!(parse_timestamp, packet, LengthCheck::Exact(20), Timestamp),
-                TypeId::TIMESTAMP_REPLY =>
-                    deserialize_packet!(parse_timestamp, packet, LengthCheck::Exact(20), TimestampReply),
-                TypeId::INFORMATION_REQUEST =>
-                    deserialize_packet!(parse_information, packet, LengthCheck::Exact(20), InformationRequest),
-                TypeId::INFORMATION_REPLY =>
-                    deserialize_packet!(parse_information, packet, LengthCheck::Exact(20), InformationReply),
+                TypeId::ECHO_REPLY => deserialize_packet!(
+                    parse_echo,
+                    packet,
+                    LengthCheck::LowerBound(super::ECHO_HEADER_SIZE),
+                    EchoReply
+                ),
+                TypeId::DESTINATION_UNREACHABLE => deserialize_packet!(
+                    parse_destination_unreachable,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE
+                    ),
+                    DestinationUnreachable
+                ),
+                TypeId::SOURCE_QUENCH => deserialize_packet!(
+                    parse_source_quench,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE
+                    ),
+                    SourceQuench
+                ),
+                TypeId::REDIRECT => deserialize_packet!(
+                    parse_redirect,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE
+                    ),
+                    Redirect
+                ),
+                TypeId::ECHO => deserialize_packet!(
+                    parse_echo,
+                    packet,
+                    LengthCheck::LowerBound(super::ECHO_HEADER_SIZE),
+                    Echo
+                ),
+                TypeId::TIME_EXCEEDED => deserialize_packet!(
+                    parse_time_exceeded,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE
+                    ),
+                    TimeExceeded
+                ),
+                TypeId::PARAMETER_PROBLEM => deserialize_packet!(
+                    parse_parameter_problem,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + super::ICMP_V4_MIN_MATCHING_DATA_SIZE
+                    ),
+                    ParameterProblem
+                ),
+                TypeId::TIMESTAMP => {
+                    deserialize_packet!(parse_timestamp, packet, LengthCheck::Exact(20), Timestamp)
+                }
+                TypeId::TIMESTAMP_REPLY => deserialize_packet!(
+                    parse_timestamp,
+                    packet,
+                    LengthCheck::Exact(20),
+                    TimestampReply
+                ),
+                TypeId::INFORMATION_REQUEST => deserialize_packet!(
+                    parse_information,
+                    packet,
+                    LengthCheck::Exact(20),
+                    InformationRequest
+                ),
+                TypeId::INFORMATION_REPLY => deserialize_packet!(
+                    parse_information,
+                    packet,
+                    LengthCheck::Exact(20),
+                    InformationReply
+                ),
                 x => Err(super::DeserializeError::MessageType(x.0)),
             }
         }
@@ -445,16 +505,25 @@ pub(crate) mod v4 {
             super::parse_echo(code, packet)
         }
 
-        fn parse_destination_unreachable(code: u8, mut packet: Bytes)
-            -> super::DeserializeResult<DestinationUnreachable>
-        {
+        fn parse_destination_unreachable(
+            code: u8,
+            mut packet: Bytes,
+        ) -> super::DeserializeResult<DestinationUnreachable> {
             Ok(DestinationUnreachable {
                 code: match DestinationUnreachableCode(code) {
                     DestinationUnreachableCode::NET_UNREACHABLE => DestinationUnreachableCode(code),
-                    DestinationUnreachableCode::HOST_UNREACHABLE => DestinationUnreachableCode(code),
-                    DestinationUnreachableCode::PROTOCOL_UNREACHABLE => DestinationUnreachableCode(code),
-                    DestinationUnreachableCode::PORT_UNREACHABLE => DestinationUnreachableCode(code),
-                    DestinationUnreachableCode::FRAGMENTATION_NEEDED => DestinationUnreachableCode(code),
+                    DestinationUnreachableCode::HOST_UNREACHABLE => {
+                        DestinationUnreachableCode(code)
+                    }
+                    DestinationUnreachableCode::PROTOCOL_UNREACHABLE => {
+                        DestinationUnreachableCode(code)
+                    }
+                    DestinationUnreachableCode::PORT_UNREACHABLE => {
+                        DestinationUnreachableCode(code)
+                    }
+                    DestinationUnreachableCode::FRAGMENTATION_NEEDED => {
+                        DestinationUnreachableCode(code)
+                    }
                     DestinationUnreachableCode::ROUTE_FAILED => DestinationUnreachableCode(code),
                     _ => return Err(super::DeserializeError::DestinationUnreachableCode(code)),
                 },
@@ -462,7 +531,10 @@ pub(crate) mod v4 {
             })
         }
 
-        fn parse_source_quench(code: u8, mut packet: Bytes) -> super::DeserializeResult<SourceQuench> {
+        fn parse_source_quench(
+            code: u8,
+            mut packet: Bytes,
+        ) -> super::DeserializeResult<SourceQuench> {
             Ok(SourceQuench {
                 code,
                 data: packet.split_off(4),
@@ -477,7 +549,10 @@ pub(crate) mod v4 {
             })
         }
 
-        fn parse_time_exceeded(code: u8, mut packet: Bytes) -> super::DeserializeResult<TimeExceeded> {
+        fn parse_time_exceeded(
+            code: u8,
+            mut packet: Bytes,
+        ) -> super::DeserializeResult<TimeExceeded> {
             Ok(TimeExceeded {
                 code: match TimeExceededCode(code) {
                     TimeExceededCode::TTL_EXCEEDED => TimeExceededCode(code),
@@ -488,7 +563,10 @@ pub(crate) mod v4 {
             })
         }
 
-        fn parse_parameter_problem(code: u8, mut packet: Bytes) -> super::DeserializeResult<ParameterProblem> {
+        fn parse_parameter_problem(
+            code: u8,
+            mut packet: Bytes,
+        ) -> super::DeserializeResult<ParameterProblem> {
             Ok(ParameterProblem {
                 code,
                 pointer: packet.get_u8(),
@@ -518,10 +596,10 @@ pub(crate) mod v4 {
 }
 
 pub(crate) mod v6 {
-    use bytes::{Buf, Bytes};
+    use super::LengthCheck;
     use crate::icmp_utils::ICMP_MIN_COMMON_HEADER_SIZE;
     use crate::net_utils;
-    use super::LengthCheck;
+    use bytes::{Buf, Bytes};
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) struct TypeId(pub u8);
@@ -552,7 +630,8 @@ pub(crate) mod v6 {
         /// No route to destination
         pub const NO_ROUTE: DestinationUnreachableCode = DestinationUnreachableCode(0);
         /// Communication with destination administratively prohibited
-        pub const ADMINISTRATIVELY_PROHIBITED: DestinationUnreachableCode = DestinationUnreachableCode(1);
+        pub const ADMINISTRATIVELY_PROHIBITED: DestinationUnreachableCode =
+            DestinationUnreachableCode(1);
         /// Beyond scope of source address
         pub const BEYOND_SCOPE: DestinationUnreachableCode = DestinationUnreachableCode(2);
         /// Address unreachable
@@ -671,7 +750,12 @@ pub(crate) mod v6 {
             {
                 return None;
             }
-            match deserialize_packet!(parse_echo, payload, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE), EchoRequest) {
+            match deserialize_packet!(
+                parse_echo,
+                payload,
+                LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE),
+                EchoRequest
+            ) {
                 Ok(Message::EchoRequest(x)) => Some(x),
                 _ => None,
             }
@@ -686,22 +770,56 @@ pub(crate) mod v6 {
 
         pub fn deserialize(mut packet: Bytes) -> super::DeserializeResult<Self> {
             if packet.is_empty() {
-                return Err(super::DeserializeError::InvalidLength("Empty packet".to_string()));
+                return Err(super::DeserializeError::InvalidLength(
+                    "Empty packet".to_string(),
+                ));
             }
 
             match TypeId(packet.get_u8()) {
-                TypeId::DESTINATION_UNREACHABLE =>
-                    deserialize_packet!(parse_destination_unreachable, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + net_utils::MIN_IPV6_HEADER_SIZE), DestinationUnreachable),
-                TypeId::PACKET_TOO_BIG =>
-                    deserialize_packet!(parse_packet_too_big, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + net_utils::MIN_IPV6_HEADER_SIZE), PacketTooBig),
-                TypeId::TIME_EXCEEDED =>
-                    deserialize_packet!(parse_time_exceeded, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + net_utils::MIN_IPV6_HEADER_SIZE), TimeExceeded),
-                TypeId::PARAMETER_PROBLEM =>
-                    deserialize_packet!(parse_parameter_problem, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE + net_utils::MIN_IPV6_HEADER_SIZE), ParameterProblem),
-                TypeId::ECHO_REQUEST =>
-                    deserialize_packet!(parse_echo, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE), EchoRequest),
-                TypeId::ECHO_REPLY =>
-                    deserialize_packet!(parse_echo, packet, LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE), EchoReply),
+                TypeId::DESTINATION_UNREACHABLE => deserialize_packet!(
+                    parse_destination_unreachable,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + net_utils::MIN_IPV6_HEADER_SIZE
+                    ),
+                    DestinationUnreachable
+                ),
+                TypeId::PACKET_TOO_BIG => deserialize_packet!(
+                    parse_packet_too_big,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + net_utils::MIN_IPV6_HEADER_SIZE
+                    ),
+                    PacketTooBig
+                ),
+                TypeId::TIME_EXCEEDED => deserialize_packet!(
+                    parse_time_exceeded,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + net_utils::MIN_IPV6_HEADER_SIZE
+                    ),
+                    TimeExceeded
+                ),
+                TypeId::PARAMETER_PROBLEM => deserialize_packet!(
+                    parse_parameter_problem,
+                    packet,
+                    LengthCheck::LowerBound(
+                        super::ICMP_MIN_COMMON_HEADER_SIZE + net_utils::MIN_IPV6_HEADER_SIZE
+                    ),
+                    ParameterProblem
+                ),
+                TypeId::ECHO_REQUEST => deserialize_packet!(
+                    parse_echo,
+                    packet,
+                    LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE),
+                    EchoRequest
+                ),
+                TypeId::ECHO_REPLY => deserialize_packet!(
+                    parse_echo,
+                    packet,
+                    LengthCheck::LowerBound(super::ICMP_MIN_COMMON_HEADER_SIZE),
+                    EchoReply
+                ),
                 x => Err(super::DeserializeError::MessageType(x.0)),
             }
         }
@@ -710,15 +828,26 @@ pub(crate) mod v6 {
             super::parse_echo(code, packet)
         }
 
-        fn parse_destination_unreachable(code: u8, mut packet: Bytes) -> super::DeserializeResult<DestinationUnreachable> {
+        fn parse_destination_unreachable(
+            code: u8,
+            mut packet: Bytes,
+        ) -> super::DeserializeResult<DestinationUnreachable> {
             Ok(DestinationUnreachable {
                 code: match DestinationUnreachableCode(code) {
                     DestinationUnreachableCode::NO_ROUTE => DestinationUnreachableCode(code),
-                    DestinationUnreachableCode::ADMINISTRATIVELY_PROHIBITED => DestinationUnreachableCode(code),
+                    DestinationUnreachableCode::ADMINISTRATIVELY_PROHIBITED => {
+                        DestinationUnreachableCode(code)
+                    }
                     DestinationUnreachableCode::BEYOND_SCOPE => DestinationUnreachableCode(code),
-                    DestinationUnreachableCode::ADDRESS_UNREACHABLE => DestinationUnreachableCode(code),
-                    DestinationUnreachableCode::PORT_UNREACHABLE => DestinationUnreachableCode(code),
-                    DestinationUnreachableCode::SOURCE_FAILED_POLICY => DestinationUnreachableCode(code),
+                    DestinationUnreachableCode::ADDRESS_UNREACHABLE => {
+                        DestinationUnreachableCode(code)
+                    }
+                    DestinationUnreachableCode::PORT_UNREACHABLE => {
+                        DestinationUnreachableCode(code)
+                    }
+                    DestinationUnreachableCode::SOURCE_FAILED_POLICY => {
+                        DestinationUnreachableCode(code)
+                    }
                     DestinationUnreachableCode::REJECT_ROUTE => DestinationUnreachableCode(code),
                     _ => return Err(super::DeserializeError::DestinationUnreachableCode(code)),
                 },
@@ -726,7 +855,10 @@ pub(crate) mod v6 {
             })
         }
 
-        fn parse_packet_too_big(code: u8, mut packet: Bytes) -> super::DeserializeResult<PacketTooBig> {
+        fn parse_packet_too_big(
+            code: u8,
+            mut packet: Bytes,
+        ) -> super::DeserializeResult<PacketTooBig> {
             Ok(PacketTooBig {
                 code,
                 mtu: packet.get_u32(),
@@ -734,7 +866,10 @@ pub(crate) mod v6 {
             })
         }
 
-        fn parse_time_exceeded(code: u8, mut packet: Bytes) -> super::DeserializeResult<TimeExceeded> {
+        fn parse_time_exceeded(
+            code: u8,
+            mut packet: Bytes,
+        ) -> super::DeserializeResult<TimeExceeded> {
             Ok(TimeExceeded {
                 code: match TimeExceededCode(code) {
                     TimeExceededCode::HOP_LIMIT => TimeExceededCode(code),
@@ -745,7 +880,10 @@ pub(crate) mod v6 {
             })
         }
 
-        fn parse_parameter_problem(code: u8, mut packet: Bytes) -> super::DeserializeResult<ParameterProblem> {
+        fn parse_parameter_problem(
+            code: u8,
+            mut packet: Bytes,
+        ) -> super::DeserializeResult<ParameterProblem> {
             Ok(ParameterProblem {
                 code,
                 pointer: packet.get_u32(),
@@ -754,7 +892,6 @@ pub(crate) mod v6 {
         }
     }
 }
-
 
 fn parse_echo(code: u8, mut packet: Bytes) -> DeserializeResult<Echo> {
     Ok(Echo {

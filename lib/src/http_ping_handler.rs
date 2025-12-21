@@ -1,9 +1,8 @@
+use crate::http_codec::HttpCodec;
+use crate::shutdown::Shutdown;
+use crate::{log_id, log_utils};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use crate::http_codec::HttpCodec;
-use crate::{log_id, log_utils};
-use crate::shutdown::Shutdown;
-
 
 pub(crate) async fn listen(
     shutdown: Arc<Mutex<Shutdown>>,
@@ -19,7 +18,12 @@ pub(crate) async fn listen(
     let listen_task = async {
         match codec.listen().await {
             Ok(Some(x)) => {
-                log_id!(trace, log_id, "Received request: {:?}", x.request().request());
+                log_id!(
+                    trace,
+                    log_id,
+                    "Received request: {:?}",
+                    x.request().request()
+                );
                 if let Err(e) = x.split().1.send_ok_response(true) {
                     log_id!(debug, log_id, "Failed to send ping response: {}", e);
                 }

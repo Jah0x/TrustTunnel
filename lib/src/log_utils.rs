@@ -1,12 +1,11 @@
+use dynfmt::Format;
+use log::{Log, Metadata, Record};
+use once_cell::sync::OnceCell;
 use std::fmt::{Display, Formatter};
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::ops::DerefMut;
 use std::sync::Mutex;
-use dynfmt::Format;
-use log::{Log, Metadata, Record};
-use once_cell::sync::OnceCell;
-
 
 /// Logs records in the standard output stream
 pub struct StdoutLogger;
@@ -19,7 +18,6 @@ pub struct FileLogger {
 /// Forces flushing buffered records to a destination while dropping
 pub struct LogFlushGuard;
 
-
 pub const fn make_stdout_logger() -> &'static impl Log {
     const LOGGER: StdoutLogger = StdoutLogger;
     &LOGGER
@@ -29,19 +27,18 @@ pub fn make_file_logger(path: &str) -> std::io::Result<&'static impl Log> {
     static LOGGER: OnceCell<FileLogger> = OnceCell::new();
     assert!(LOGGER.get().is_none());
 
-    LOGGER.get_or_try_init(|| {
-        FileLogger::new(path)
-    })
+    LOGGER.get_or_try_init(|| FileLogger::new(path))
 }
 
-
 fn write_record(mut w: impl Write, record: &Record) -> std::io::Result<()> {
-    writeln!(w, "{} [{:?}] [{}] [{}] {}",
-             chrono::Local::now().format("%T.%6f"),
-             std::thread::current().id(),
-             record.level(),
-             record.target(),
-             record.args(),
+    writeln!(
+        w,
+        "{} [{:?}] [{}] [{}] {}",
+        chrono::Local::now().format("%T.%6f"),
+        std::thread::current().id(),
+        record.level(),
+        record.target(),
+        record.args(),
     )
 }
 
@@ -59,7 +56,6 @@ impl Log for StdoutLogger {
     fn flush(&self) {}
 }
 
-
 impl FileLogger {
     pub fn new(path: &str) -> std::io::Result<Self> {
         Ok(Self {
@@ -68,7 +64,7 @@ impl FileLogger {
                     .create(true)
                     .write(true)
                     .truncate(true)
-                    .open(path)?
+                    .open(path)?,
             )),
         })
     }
@@ -106,7 +102,6 @@ impl Drop for LogFlushGuard {
     }
 }
 
-
 #[macro_export]
 macro_rules! log_id {
     ($lvl:ident, $id_chain:expr, $msg:expr) => {
@@ -117,11 +112,9 @@ macro_rules! log_id {
     };
 }
 
-
 pub(crate) const CLIENT_ID_FMT: &str = "CLIENT={}";
 pub(crate) const TUNNEL_ID_FMT: &str = "TUN={}";
 pub(crate) const CONNECTION_ID_FMT: &str = "CONN={}";
-
 
 #[derive(Copy, Clone)]
 pub struct IdItem<T: Copy + serde::ser::Serialize> {
@@ -135,10 +128,7 @@ pub struct IdChain<T: Copy + serde::ser::Serialize> {
 }
 
 impl<T: Copy + serde::ser::Serialize> IdItem<T> {
-    pub fn new(
-        fmt: &'static str,
-        id: T,
-    ) -> Self {
+    pub fn new(fmt: &'static str, id: T) -> Self {
         Self { fmt, id }
     }
 }
@@ -166,26 +156,23 @@ impl<T: Copy + serde::ser::Serialize> IdChain<T> {
 
 impl<T: Copy + serde::ser::Serialize> From<IdItem<T>> for IdChain<T> {
     fn from(x: IdItem<T>) -> Self {
-        Self {
-            list: vec![x],
-        }
+        Self { list: vec![x] }
     }
 }
 
 impl<T: Copy + serde::ser::Serialize> Display for IdChain<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        let str = self.list.iter()
-            .fold(String::new(), |acc, i| {
-                let x = dynfmt::curly::SimpleCurlyFormat
-                    .format(i.fmt, [i.id])
-                    .unwrap();
+        let str = self.list.iter().fold(String::new(), |acc, i| {
+            let x = dynfmt::curly::SimpleCurlyFormat
+                .format(i.fmt, [i.id])
+                .unwrap();
 
-                if !acc.is_empty() {
-                    acc + "/" + x.as_ref()
-                } else {
-                    x.to_string()
-                }
-            });
+            if !acc.is_empty() {
+                acc + "/" + x.as_ref()
+            } else {
+                x.to_string()
+            }
+        });
         write!(f, "{}", str)
     }
 }

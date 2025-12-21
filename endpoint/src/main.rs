@@ -1,14 +1,13 @@
-use std::sync::Arc;
 use log::{error, info, LevelFilter};
+use std::sync::Arc;
 use tokio::signal;
 use trusttunnel::authentication::registry_based::RegistryBasedAuthenticator;
 use trusttunnel::authentication::Authenticator;
+use trusttunnel::client_config;
 use trusttunnel::core::Core;
-use trusttunnel::{log_utils, settings};
 use trusttunnel::settings::Settings;
 use trusttunnel::shutdown::Shutdown;
-use trusttunnel::client_config;
-
+use trusttunnel::{log_utils, settings};
 
 const VERSION_STRING: &str = env!("CARGO_PKG_VERSION");
 
@@ -21,7 +20,6 @@ const CLIENT_CONFIG_PARAM_NAME: &str = "client_config";
 const ADDRESS_PARAM_NAME: &str = "address";
 const SENTRY_DSN_PARAM_NAME: &str = "sentry_dsn";
 const THREADS_NUM_PARAM_NAME: &str = "threads_num";
-
 
 fn main() {
     let args = clap::Command::new("VPN endpoint")
@@ -89,49 +87,65 @@ fn main() {
     #[cfg(feature = "tracing")]
     console_subscriber::init();
 
-    let _guard = args.get_one::<String>(SENTRY_DSN_PARAM_NAME)
-        .map(|x| sentry::init((
+    let _guard = args.get_one::<String>(SENTRY_DSN_PARAM_NAME).map(|x| {
+        sentry::init((
             x.clone(),
             sentry::ClientOptions {
                 release: sentry::release_name!(),
                 ..Default::default()
-            }
-        )));
+            },
+        ))
+    });
 
     let _guard = log_utils::LogFlushGuard;
     log::set_logger(match args.get_one::<String>(LOG_FILE_PARAM_NAME) {
         None => log_utils::make_stdout_logger(),
-        Some(file) => log_utils::make_file_logger(file)
-            .expect("Couldn't open the logging file"),
-    }).expect("Couldn't set logger");
+        Some(file) => log_utils::make_file_logger(file).expect("Couldn't open the logging file"),
+    })
+    .expect("Couldn't set logger");
 
-    log::set_max_level(match args.get_one::<String>(LOG_LEVEL_PARAM_NAME).map(String::as_str) {
-        None => LevelFilter::Info,
-        Some("info") => LevelFilter::Info,
-        Some("debug") => LevelFilter::Debug,
-        Some("trace") => LevelFilter::Trace,
-        Some(x) => panic!("Unexpected log level: {}", x),
-    });
+    log::set_max_level(
+        match args
+            .get_one::<String>(LOG_LEVEL_PARAM_NAME)
+            .map(String::as_str)
+        {
+            None => LevelFilter::Info,
+            Some("info") => LevelFilter::Info,
+            Some("debug") => LevelFilter::Debug,
+            Some("trace") => LevelFilter::Trace,
+            Some(x) => panic!("Unexpected log level: {}", x),
+        },
+    );
 
     let settings_path = args.get_one::<String>(SETTINGS_PARAM_NAME).unwrap();
     let settings: Settings = toml::from_str(
-        &std::fs::read_to_string(settings_path).expect("Couldn't read the settings file")
-    ).expect("Couldn't parse the settings file");
+        &std::fs::read_to_string(settings_path).expect("Couldn't read the settings file"),
+    )
+    .expect("Couldn't parse the settings file");
 
-    let tls_hosts_settings_path = args.get_one::<String>(TLS_HOSTS_SETTINGS_PARAM_NAME).unwrap();
+    let tls_hosts_settings_path = args
+        .get_one::<String>(TLS_HOSTS_SETTINGS_PARAM_NAME)
+        .unwrap();
     let tls_hosts_settings: settings::TlsHostsSettings = toml::from_str(
         &std::fs::read_to_string(tls_hosts_settings_path)
-            .expect("Couldn't read the TLS hosts settings file")
-    ).expect("Couldn't parse the TLS hosts settings file");
+            .expect("Couldn't read the TLS hosts settings file"),
+    )
+    .expect("Couldn't parse the TLS hosts settings file");
 
     if args.contains_id(CLIENT_CONFIG_PARAM_NAME) {
         let username = args.get_one::<String>(CLIENT_CONFIG_PARAM_NAME).unwrap();
-        let addresses: Vec<String> = args.get_many::<String>(ADDRESS_PARAM_NAME)
+        let addresses: Vec<String> = args
+            .get_many::<String>(ADDRESS_PARAM_NAME)
             .map(Iterator::cloned)
             .map(Iterator::collect)
             .expect("Addresses should be specified");
 
-        let client_config = client_config::build(&username, &addresses, settings.get_clients(), &tls_hosts_settings);
+        let client_config = client_config::build(
+            &username,
+            &addresses,
+            settings.get_clients(),
+            &tls_hosts_settings,
+        );
         println!("{}", client_config.compose_toml());
         return;
     }
@@ -145,25 +159,30 @@ fn main() {
             builder.worker_threads(*n);
         }
 
-        builder.build()
-            .expect("Failed to set up runtime")
+        builder.build().expect("Failed to set up runtime")
     };
 
     let shutdown = Shutdown::new();
     let authenticator: Option<Arc<dyn Authenticator>> = if !settings.get_clients().is_empty() {
-        Some(Arc::new(RegistryBasedAuthenticator::new(settings.get_clients())))
+        Some(Arc::new(RegistryBasedAuthenticator::new(
+            settings.get_clients(),
+        )))
     } else {
         None
     };
-    let core = Arc::new(Core::new(
-        settings, authenticator, tls_hosts_settings, shutdown.clone(),
-    ).expect("Couldn't create core instance"));
+    let core = Arc::new(
+        Core::new(
+            settings,
+            authenticator,
+            tls_hosts_settings,
+            shutdown.clone(),
+        )
+        .expect("Couldn't create core instance"),
+    );
 
     let listen_task = {
         let core = core.clone();
-        async move {
-            core.listen().await
-        }
+        async move { core.listen().await }
     };
 
     let reload_tls_hosts_task = {
@@ -178,10 +197,12 @@ fn main() {
 
                 let tls_hosts_settings: settings::TlsHostsSettings = toml::from_str(
                     &std::fs::read_to_string(&tls_hosts_settings_path)
-                        .expect("Couldn't read the TLS hosts settings file")
-                ).expect("Couldn't parse the TLS hosts settings file");
+                        .expect("Couldn't read the TLS hosts settings file"),
+                )
+                .expect("Couldn't parse the TLS hosts settings file");
 
-                core.reload_tls_hosts_settings(tls_hosts_settings).expect("Couldn't apply new settings");
+                core.reload_tls_hosts_settings(tls_hosts_settings)
+                    .expect("Couldn't apply new settings");
                 info!("TLS hosts settings are successfully reloaded");
             }
         }

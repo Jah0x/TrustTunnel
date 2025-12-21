@@ -1,12 +1,11 @@
+use crate::net_utils::TcpDestination;
+use crate::tls_demultiplexer::Protocol;
+use crate::{authentication, datagram_pipe, forwarder, icmp_utils, log_utils, pipe, tunnel};
+use async_trait::async_trait;
+use bytes::Bytes;
 use std::fmt::{Debug, Formatter};
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use async_trait::async_trait;
-use bytes::Bytes;
-use crate::{authentication, datagram_pipe, forwarder, icmp_utils, log_utils, pipe, tunnel};
-use crate::tls_demultiplexer::Protocol;
-use crate::net_utils::TcpDestination;
-
 
 #[derive(Debug, Hash, PartialEq, Eq)]
 pub(crate) struct UdpDatagramMeta {
@@ -50,9 +49,7 @@ pub(crate) trait PendingRequest: StreamId + Send {
 
 /// An abstract interface for a pre-demultiplexed request
 pub(crate) trait PendingMultiplexedRequest:
-    StreamId
-    + PendingRequest<NextState = Option<PendingDemultiplexedRequest>>
-    + Send
+    StreamId + PendingRequest<NextState = Option<PendingDemultiplexedRequest>> + Send
 {
     /// Get the authorization info
     fn auth_info(&self) -> io::Result<Option<authentication::Source<'_>>>;
@@ -65,9 +62,7 @@ pub(crate) enum PendingDemultiplexedRequest {
 
 /// An abstract interface for a TCP connection request implementation
 pub(crate) trait PendingTcpConnectRequest:
-    StreamId
-    + PendingRequest<NextState = (Box<dyn pipe::Source>, Box<dyn pipe::Sink>)>
-    + Send
+    StreamId + PendingRequest<NextState = (Box<dyn pipe::Source>, Box<dyn pipe::Sink>)> + Send
 {
     /// Get the address of a VPN client made the connection request
     fn client_address(&self) -> io::Result<IpAddr>;
@@ -80,15 +75,19 @@ pub(crate) trait PendingTcpConnectRequest:
 }
 
 pub(crate) enum DatagramPipeHalves {
-    Udp(Box<dyn datagram_pipe::Source<Output = UdpDatagram>>, Box<dyn datagram_pipe::Sink<Input = forwarder::UdpDatagram>>),
-    Icmp(Box<dyn datagram_pipe::Source<Output = IcmpDatagram>>, Box<dyn datagram_pipe::Sink<Input = forwarder::IcmpDatagram>>),
+    Udp(
+        Box<dyn datagram_pipe::Source<Output = UdpDatagram>>,
+        Box<dyn datagram_pipe::Sink<Input = forwarder::UdpDatagram>>,
+    ),
+    Icmp(
+        Box<dyn datagram_pipe::Source<Output = IcmpDatagram>>,
+        Box<dyn datagram_pipe::Sink<Input = forwarder::IcmpDatagram>>,
+    ),
 }
 
 /// An abstract interface for a datagram multiplexer open request implementation
 pub(crate) trait PendingDatagramMultiplexerRequest:
-    StreamId
-    + PendingRequest<NextState = DatagramPipeHalves>
-    + Send
+    StreamId + PendingRequest<NextState = DatagramPipeHalves> + Send
 {
     /// Get the address of a VPN client made the connection request
     fn client_address(&self) -> io::Result<IpAddr>;

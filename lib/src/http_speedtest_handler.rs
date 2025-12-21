@@ -1,11 +1,11 @@
-use std::io::ErrorKind;
-use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
-use bytes::Bytes;
-use crate::{http_codec, log_id, log_utils, pipe};
 use crate::http_codec::HttpCodec;
 use crate::shutdown::Shutdown;
+use crate::{http_codec, log_id, log_utils, pipe};
+use bytes::Bytes;
+use std::io::ErrorKind;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 pub(crate) const SKIPPABLE_PATH_SEGMENT: &str = "speed";
 
@@ -84,7 +84,9 @@ async fn listen_inner(
                     Err(description) => {
                         let log_id = x.id();
                         log_id!(debug, log_id, "Invalid request: {}", description);
-                        if let Err(e) = x.split().1
+                        if let Err(e) = x
+                            .split()
+                            .1
                             .send_bad_response(http::StatusCode::BAD_REQUEST, Default::default())
                         {
                             log_id!(debug, log_id, "Failed to send bad response: {}", e);
@@ -104,8 +106,11 @@ async fn listen_inner(
                 log_id!(debug, log_id, "Session error: {}", e);
                 break;
             }
-            Err(_elapsed) if manager.running_tests_num.load(Ordering::Acquire) > 0 =>
-                log_id!(trace, log_id, "Ignoring timeout due to there are some uncompleted tests"),
+            Err(_elapsed) if manager.running_tests_num.load(Ordering::Acquire) > 0 => log_id!(
+                trace,
+                log_id,
+                "Ignoring timeout due to there are some uncompleted tests"
+            ),
             Err(_elapsed) => {
                 log_id!(debug, log_id, "Closing due to timeout");
                 if let Err(e) = codec.graceful_shutdown().await {
@@ -118,18 +123,20 @@ async fn listen_inner(
 }
 
 fn prepare_speedtest(request: &http_codec::RequestHeaders) -> Result<Speedtest, String> {
-    let path =
-        if let Some(x) = request.uri.path()
-            .strip_prefix('/')
-            .and_then(|x| x.strip_prefix(SKIPPABLE_PATH_SEGMENT))
-        {
-            x
-        } else {
-            request.uri.path()
-        };
+    let path = if let Some(x) = request
+        .uri
+        .path()
+        .strip_prefix('/')
+        .and_then(|x| x.strip_prefix(SKIPPABLE_PATH_SEGMENT))
+    {
+        x
+    } else {
+        request.uri.path()
+    };
 
     match request.method {
-        http::Method::GET => path.strip_prefix('/')
+        http::Method::GET => path
+            .strip_prefix('/')
             .and_then(|x| x.strip_suffix("mb.bin"))
             .and_then(|x| x.parse::<u32>().ok())
             .and_then(|x| (0 < x && x <= MAX_DOWNLOAD_MB).then_some(x))
@@ -140,7 +147,9 @@ fn prepare_speedtest(request: &http_codec::RequestHeaders) -> Result<Speedtest, 
                 return Err("Unexpected path".to_string());
             }
 
-            request.headers.get(http::header::CONTENT_LENGTH)
+            request
+                .headers
+                .get(http::header::CONTENT_LENGTH)
                 .and_then(|x| x.to_str().ok())
                 .and_then(|x| x.parse::<u32>().ok())
                 .and_then(|x| (0 < x && x <= MAX_UPLOAD_MB * 1024 * 1024).then_some(x))
@@ -161,7 +170,8 @@ async fn run_download_test(stream: Box<dyn http_codec::Stream>, n: u32) {
         .header(http::header::ACCESS_CONTROL_ALLOW_ORIGIN, "*")
         .body(())
         .unwrap()
-        .into_parts().0;
+        .into_parts()
+        .0;
 
     // @fixme: when running over HTTP/3 response sending fails with `TransportError(FinalSize)`
     let mut sink = match stream.split().1.send_response(response, false) {
@@ -182,13 +192,25 @@ async fn run_download_test(stream: Box<dyn http_codec::Stream>, n: u32) {
         match sink.write(chunk) {
             Ok(unsent) => n = n.saturating_sub(chunk_length - unsent.len()),
             Err(e) => {
-                log_id!(debug, log_id, "Failed to send chunk: error='{}', remaining unsent {} bytes", e, n);
+                log_id!(
+                    debug,
+                    log_id,
+                    "Failed to send chunk: error='{}', remaining unsent {} bytes",
+                    e,
+                    n
+                );
                 return;
             }
         }
 
         if let Err(e) = sink.wait_writable().await {
-            log_id!(debug, log_id, "Error on stream: error='{}', remaining unsent {} bytes", e, n);
+            log_id!(
+                debug,
+                log_id,
+                "Error on stream: error='{}', remaining unsent {} bytes",
+                e,
+                n
+            );
             return;
         }
     }
@@ -210,16 +232,33 @@ async fn run_upload_test(stream: Box<dyn http_codec::Stream>, n: u32) {
             Ok(pipe::Data::Chunk(x)) => {
                 n = n.saturating_sub(x.len());
                 if let Err(e) = source.consume(x.len()) {
-                    log_id!(debug, log_id, "Failed to consume: error='{}', remaining unreceived {} bytes", e, n);
+                    log_id!(
+                        debug,
+                        log_id,
+                        "Failed to consume: error='{}', remaining unreceived {} bytes",
+                        e,
+                        n
+                    );
                     return;
                 }
             }
             Ok(pipe::Data::Eof) => {
-                log_id!(debug, log_id, "Stream closed, remaining unreceived {} bytes", n);
+                log_id!(
+                    debug,
+                    log_id,
+                    "Stream closed, remaining unreceived {} bytes",
+                    n
+                );
                 break;
             }
             Err(e) => {
-                log_id!(debug, log_id, "Error on stream: error='{}', remaining unreceived {} bytes", e, n);
+                log_id!(
+                    debug,
+                    log_id,
+                    "Error on stream: error='{}', remaining unreceived {} bytes",
+                    e,
+                    n
+                );
                 return;
             }
         }

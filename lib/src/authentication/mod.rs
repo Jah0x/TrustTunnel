@@ -1,9 +1,7 @@
 pub mod registry_based;
 
-
-use std::borrow::Cow;
 use crate::log_utils;
-
+use std::borrow::Cow;
 
 /// Authentication request source
 #[derive(Debug, Clone, PartialEq)]

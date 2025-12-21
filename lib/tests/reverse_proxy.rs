@@ -1,11 +1,14 @@
-use std::future::Future;
-use std::net::{Ipv4Addr, SocketAddr};
-use std::time::Duration;
 use bytes::Bytes;
 use http::{Request, Response};
 use log::info;
+use std::future::Future;
+use std::net::{Ipv4Addr, SocketAddr};
+use std::time::Duration;
 use tokio::net::TcpListener;
-use trusttunnel::settings::{Http1Settings, Http2Settings, ListenProtocolSettings, QuicSettings, ReverseProxySettings, Settings, TlsHostInfo, TlsHostsSettings};
+use trusttunnel::settings::{
+    Http1Settings, Http2Settings, ListenProtocolSettings, QuicSettings, ReverseProxySettings,
+    Settings, TlsHostInfo, TlsHostsSettings,
+};
 
 #[allow(dead_code)]
 mod common;
@@ -49,14 +52,20 @@ async fn sni_h1_client(endpoint_address: &SocketAddr) -> (http::response::Parts,
         &format!("hello.{}", common::MAIN_DOMAIN_NAME),
         endpoint_address,
         None,
-    ).await;
+    )
+    .await;
 
     common::do_get_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://hello.{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://hello.{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         &[],
-    ).await
+    )
+    .await
 }
 
 async fn sni_h3_client(endpoint_address: &SocketAddr) -> (http::response::Parts, Bytes) {
@@ -64,47 +73,58 @@ async fn sni_h3_client(endpoint_address: &SocketAddr) -> (http::response::Parts,
         endpoint_address,
         &format!("hello.{}", common::MAIN_DOMAIN_NAME),
         None,
-    ).await;
+    )
+    .await;
 
     conn.exchange(
-        Request::get(
-            format!("https://hello.{}:{}", common::MAIN_DOMAIN_NAME, endpoint_address.port())
-        ).body(hyper::Body::empty()).unwrap()
-    ).await
+        Request::get(format!(
+            "https://hello.{}:{}",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ))
+        .body(hyper::Body::empty())
+        .unwrap(),
+    )
+    .await
 }
 
 async fn path_h1_client(endpoint_address: &SocketAddr) -> (http::response::Parts, Bytes) {
-    let stream = common::establish_tls_connection(
-        common::MAIN_DOMAIN_NAME,
-        endpoint_address,
-        None,
-    ).await;
+    let stream =
+        common::establish_tls_connection(common::MAIN_DOMAIN_NAME, endpoint_address, None).await;
 
     common::do_get_request(
         stream,
         http::Version::HTTP_11,
-        &format!("https://{}:{}/hello/haha", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
+        &format!(
+            "https://{}:{}/hello/haha",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ),
         &[(http::header::UPGRADE.as_str(), "1")],
-    ).await
+    )
+    .await
 }
 
 async fn path_h3_client(endpoint_address: &SocketAddr) -> (http::response::Parts, Bytes) {
-    let mut conn = common::Http3Session::connect(
-        endpoint_address,
-        common::MAIN_DOMAIN_NAME,
-        None,
-    ).await;
+    let mut conn =
+        common::Http3Session::connect(endpoint_address, common::MAIN_DOMAIN_NAME, None).await;
 
     conn.exchange(
-        Request::get(
-            format!("https://{}:{}/hello/haha", common::MAIN_DOMAIN_NAME, endpoint_address.port()),
-        ).body(hyper::Body::empty()).unwrap()
-    ).await
+        Request::get(format!(
+            "https://{}:{}/hello/haha",
+            common::MAIN_DOMAIN_NAME,
+            endpoint_address.port()
+        ))
+        .body(hyper::Body::empty())
+        .unwrap(),
+    )
+    .await
 }
 
 async fn run_endpoint(endpoint_address: &SocketAddr, proxy_address: &SocketAddr) {
     let settings = Settings::builder()
-        .listen_address(endpoint_address).unwrap()
+        .listen_address(endpoint_address)
+        .unwrap()
         .listen_protocols(ListenProtocolSettings {
             http1: Some(Http1Settings::builder().build()),
             http2: Some(Http2Settings::builder().build()),
@@ -112,12 +132,15 @@ async fn run_endpoint(endpoint_address: &SocketAddr, proxy_address: &SocketAddr)
         })
         .reverse_proxy(
             ReverseProxySettings::builder()
-                .server_address(proxy_address).unwrap()
+                .server_address(proxy_address)
+                .unwrap()
                 .path_mask("/hello".to_string())
-                .build().unwrap()
+                .build()
+                .unwrap(),
         )
         .allow_private_network_connections(true)
-        .build().unwrap();
+        .build()
+        .unwrap();
 
     let cert_key_file = common::make_cert_key_file();
     let cert_key_path = cert_key_file.path.to_str().unwrap();
@@ -132,28 +155,35 @@ async fn run_endpoint(endpoint_address: &SocketAddr, proxy_address: &SocketAddr)
             cert_chain_path: cert_key_path.to_string(),
             private_key_path: cert_key_path.to_string(),
         }])
-        .build().unwrap();
+        .build()
+        .unwrap();
 
     common::run_endpoint_with_settings(settings, hosts_settings).await;
 }
 
-fn run_proxy() -> (SocketAddr, impl Future<Output=()>) {
+fn run_proxy() -> (SocketAddr, impl Future<Output = ()>) {
     let server = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let server_addr = server.local_addr().unwrap();
-    (
-        server_addr,
-        async move {
-            let (socket, peer) = TcpListener::from_std(server).unwrap().accept().await.unwrap();
-            info!("New connection from {}", peer);
-            hyper::server::conn::Http::new()
-                .http1_only(true)
-                .serve_connection(socket, hyper::service::service_fn(request_handler))
-                .await.unwrap();
-        },
-    )
+    (server_addr, async move {
+        let (socket, peer) = TcpListener::from_std(server)
+            .unwrap()
+            .accept()
+            .await
+            .unwrap();
+        info!("New connection from {}", peer);
+        hyper::server::conn::Http::new()
+            .http1_only(true)
+            .serve_connection(socket, hyper::service::service_fn(request_handler))
+            .await
+            .unwrap();
+    })
 }
 
-async fn request_handler(request: Request<hyper::Body>) -> Result<Response<hyper::Body>, hyper::Error> {
+async fn request_handler(
+    request: Request<hyper::Body>,
+) -> Result<Response<hyper::Body>, hyper::Error> {
     info!("Received request: {:?}", request);
-    Ok(Response::builder().body(hyper::Body::from("how much watch?")).unwrap())
+    Ok(Response::builder()
+        .body(hyper::Body::from("how much watch?"))
+        .unwrap())
 }

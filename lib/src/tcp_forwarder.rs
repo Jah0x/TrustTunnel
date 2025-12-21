@@ -1,17 +1,16 @@
+use crate::forwarder::TcpConnector;
+use crate::net_utils::TcpDestination;
+use crate::settings::Settings;
+use crate::{forwarder, log_id, log_utils, net_utils, pipe, tunnel};
+use async_trait::async_trait;
+use bytes::{Buf, Bytes};
 use std::io;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use async_trait::async_trait;
-use bytes::{Buf, Bytes};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use crate::forwarder::TcpConnector;
-use crate::net_utils::TcpDestination;
-use crate::{forwarder, log_id, log_utils, net_utils, pipe, tunnel};
-use crate::settings::Settings;
-
 
 pub(crate) struct TcpForwarder {
     core_settings: Arc<Settings>,
@@ -33,23 +32,17 @@ struct StreamTx {
 }
 
 impl TcpForwarder {
-    pub fn new(
-        core_settings: Arc<Settings>,
-    ) -> Self {
-        Self {
-            core_settings,
-        }
+    pub fn new(core_settings: Arc<Settings>) -> Self {
+        Self { core_settings }
     }
 
     pub fn pipe_from_stream(
-        stream: TcpStream, id: log_utils::IdChain<u64>
+        stream: TcpStream,
+        id: log_utils::IdChain<u64>,
     ) -> (Box<dyn pipe::Source>, Box<dyn pipe::Sink>) {
         let (rx, tx) = stream.into_split();
         (
-            Box::new(StreamRx {
-                rx,
-                id: id.clone(),
-            }),
+            Box::new(StreamRx { rx, id: id.clone() }),
             Box::new(StreamTx {
                 tx,
                 is_shut_down: false,
@@ -71,7 +64,8 @@ impl TcpConnector for TcpForwarder {
             TcpDestination::HostName(peer) => {
                 log_id!(trace, id, "Resolving peer: {:?}", peer);
 
-                let resolved = tokio::net::lookup_host(format!("{}:{}", peer.0, peer.1)).await
+                let resolved = tokio::net::lookup_host(format!("{}:{}", peer.0, peer.1))
+                    .await
                     .map_err(io_to_connection_error)?;
 
                 enum SelectionStatus {
@@ -103,11 +97,18 @@ impl TcpConnector for TcpForwarder {
                 }
 
                 match status {
-                    None => return Err(io_to_connection_error(io::Error::new(
-                        ErrorKind::Other, "Resolved to empty list"
-                    ))),
-                    Some(SelectionStatus::Loopback) => return Err(tunnel::ConnectionError::DnsLoopback),
-                    Some(SelectionStatus::NonRoutable) => return Err(tunnel::ConnectionError::DnsNonroutable),
+                    None => {
+                        return Err(io_to_connection_error(io::Error::new(
+                            ErrorKind::Other,
+                            "Resolved to empty list",
+                        )))
+                    }
+                    Some(SelectionStatus::Loopback) => {
+                        return Err(tunnel::ConnectionError::DnsLoopback)
+                    }
+                    Some(SelectionStatus::NonRoutable) => {
+                        return Err(tunnel::ConnectionError::DnsNonroutable)
+                    }
                     Some(SelectionStatus::Suitable(x)) => {
                         log_id!(trace, id, "Selected address: {}", x);
                         x
@@ -117,8 +118,12 @@ impl TcpConnector for TcpForwarder {
         };
 
         log_id!(trace, id, "Connecting to peer: {}", peer);
-        TcpStream::connect(peer).await
-            .and_then(|s| { s.set_nodelay(true)?; Ok(s) })
+        TcpStream::connect(peer)
+            .await
+            .and_then(|s| {
+                s.set_nodelay(true)?;
+                Ok(s)
+            })
             .map(|s| TcpForwarder::pipe_from_stream(s, id))
             .map_err(io_to_connection_error)
     }
@@ -158,7 +163,10 @@ impl pipe::Sink for StreamTx {
 
     fn write(&mut self, mut data: Bytes) -> io::Result<Bytes> {
         if self.is_shut_down {
-            return Err(io::Error::new(ErrorKind::Other, "Already shutdown".to_string()));
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "Already shutdown".to_string(),
+            ));
         }
 
         while !data.is_empty() {
@@ -179,7 +187,10 @@ impl pipe::Sink for StreamTx {
 
     async fn wait_writable(&mut self) -> io::Result<()> {
         if self.is_shut_down {
-            return Err(io::Error::new(ErrorKind::Other, "Already shutdown".to_string()));
+            return Err(io::Error::new(
+                ErrorKind::Other,
+                "Already shutdown".to_string(),
+            ));
         }
 
         self.tx.writable().await
