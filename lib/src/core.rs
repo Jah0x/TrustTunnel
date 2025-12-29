@@ -19,6 +19,7 @@ use crate::{
     authentication, http_ping_handler, http_speedtest_handler, log_id, log_utils, metrics,
     net_utils, reverse_proxy, rules, settings, tls_demultiplexer, tunnel,
 };
+use socket2::SockRef;
 use std::io;
 use std::io::ErrorKind;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -173,8 +174,13 @@ impl Core {
                 log_utils::CLIENT_ID_FMT,
                 self.context.next_client_id.fetch_add(1, Ordering::Relaxed),
             ));
+            log_id!(trace, client_id, "Accepting TCP connection");
             let (stream, client_addr) = match tcp_listener.accept().await.and_then(|(s, a)| {
                 s.set_nodelay(true)?;
+
+                // Enable TCP keepalive to detect broken connections.
+                let sock_ref = SockRef::from(&s);
+                sock_ref.set_keepalive(true)?;
                 Ok((s, a))
             }) {
                 Ok((stream, addr)) => {
@@ -195,12 +201,18 @@ impl Core {
                 let context = self.context.clone();
                 let tls_listener = tls_listener.clone();
                 async move {
+                    log_id!(trace, client_id, "Starting TLS handshake");
                     let handshake_timeout = context.settings.tls_handshake_timeout;
                     match tokio::time::timeout(handshake_timeout, tls_listener.listen(stream))
                         .await
                         .unwrap_or_else(|_| Err(io::Error::from(ErrorKind::TimedOut)))
                     {
                         Ok(acceptor) => {
+                            log_id!(
+                                trace,
+                                client_id,
+                                "TLS handshake complete, processing connection"
+                            );
                             if let Err((client_id, message)) = Core::on_new_tls_connection(
                                 context.clone(),
                                 acceptor,
@@ -264,6 +276,12 @@ impl Core {
         client_ip: std::net::IpAddr,
         client_id: log_utils::IdChain<u64>,
     ) -> Result<(), (log_utils::IdChain<u64>, String)> {
+        log_id!(
+            trace,
+            client_id,
+            "Processing TLS connection from {}",
+            client_ip
+        );
         let sni = match acceptor.sni() {
             Some(s) => s,
             None => {
@@ -273,6 +291,12 @@ impl Core {
                 ))
             }
         };
+        log_id!(
+            trace,
+            client_id,
+            "TLS SNI: {}",
+            net_utils::scrub_sni(sni.to_string())
+        );
         // Apply connection filtering rules
         if let Err(deny_reason) = Self::evaluate_connection_rules(
             &context,
@@ -311,31 +335,51 @@ impl Core {
             tls_connection_meta
         );
 
-        let stream = match acceptor
-            .accept(
+        log_id!(
+            trace,
+            client_id,
+            "Accepting TLS connection with protocol {:?}",
+            tls_connection_meta.protocol
+        );
+        let stream = match tokio::time::timeout(
+            context.settings.tls_handshake_timeout,
+            acceptor.accept(
                 tls_connection_meta.protocol,
                 tls_connection_meta.cert_chain,
                 tls_connection_meta.key,
                 &client_id,
-            )
-            .await
+            ),
+        )
+        .await
         {
-            Ok(s) => {
+            Ok(Ok(s)) => {
                 log_id!(debug, client_id, "New TLS client: {:?}", s);
                 s
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 return Err((client_id, format!("TLS connection failed: {}", e)));
+            }
+            Err(_) => {
+                return Err((
+                    client_id,
+                    "TLS connection failed: handshake timed out".to_string(),
+                ));
             }
         };
 
+        log_id!(
+            trace,
+            client_id,
+            "Routing to channel: {:?}",
+            tls_connection_meta.channel
+        );
         match tls_connection_meta.channel {
             net_utils::Channel::Tunnel => {
                 let tunnel_id = client_id.extended(log_utils::IdItem::new(
                     log_utils::TUNNEL_ID_FMT,
                     context.next_tunnel_id.fetch_add(1, Ordering::Relaxed),
                 ));
-
+                log_id!(trace, tunnel_id, "Creating tunnel");
                 Self::on_tunnel_request(
                     context,
                     tls_connection_meta.protocol,

@@ -29,11 +29,22 @@ macro_rules! reverse_proxy_tests {
                 assert_eq!(body.as_ref(), b"how much watch?");
             };
 
+            // Pin both tasks to avoid moving them
+            tokio::pin!(client_task);
+            tokio::pin!(proxy_task);
+
             tokio::select! {
                 _ = run_endpoint(&endpoint_address, &proxy_address) => unreachable!(),
-                _ = proxy_task => unreachable!(),
-                _ = client_task => (),
                 _ = tokio::time::sleep(Duration::from_secs(10)) => panic!("Timed out"),
+                // Wait for client_task first; if proxy_task completes, continue waiting for client
+                _ = &mut client_task => (),
+                _ = &mut proxy_task => {
+                    // Proxy completed (expected after handling request), now wait for client
+                    tokio::select! {
+                        _ = client_task => (),
+                        _ = tokio::time::sleep(Duration::from_secs(5)) => panic!("Client timed out after proxy completed"),
+                    }
+                },
             }
         }
     )*

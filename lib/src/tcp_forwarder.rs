@@ -27,7 +27,7 @@ struct StreamTx {
     /// supported in the wild. For example,
     /// nginx https://mailman.nginx.org/pipermail/nginx/2008-September/007388.html, or
     /// golang https://github.com/golang/go/issues/18527.
-    is_shut_down: bool,
+    eof_pending: bool,
     id: log_utils::IdChain<u64>,
 }
 
@@ -45,7 +45,7 @@ impl TcpForwarder {
             Box::new(StreamRx { rx, id: id.clone() }),
             Box::new(StreamTx {
                 tx,
-                is_shut_down: false,
+                eof_pending: false,
                 id,
             }),
         )
@@ -124,7 +124,17 @@ impl TcpConnector for TcpForwarder {
                 s.set_nodelay(true)?;
                 Ok(s)
             })
-            .map(|s| TcpForwarder::pipe_from_stream(s, id))
+            .map(|s| {
+                if let Ok(local_addr) = s.local_addr() {
+                    log_id!(
+                        trace,
+                        id,
+                        "Connection established, local port: {}",
+                        local_addr.port()
+                    );
+                }
+                TcpForwarder::pipe_from_stream(s, id)
+            })
             .map_err(io_to_connection_error)
     }
 }
@@ -162,7 +172,7 @@ impl pipe::Sink for StreamTx {
     }
 
     fn write(&mut self, mut data: Bytes) -> io::Result<Bytes> {
-        if self.is_shut_down {
+        if self.eof_pending {
             return Err(io::Error::new(
                 ErrorKind::Other,
                 "Already shut down".to_string(),
@@ -181,12 +191,14 @@ impl pipe::Sink for StreamTx {
     }
 
     fn eof(&mut self) -> io::Result<()> {
-        self.is_shut_down = true;
+        // Mark eof as pending but do not close the connection yet, it will
+        // be done in flush.
+        self.eof_pending = true;
         Ok(())
     }
 
     async fn wait_writable(&mut self) -> io::Result<()> {
-        if self.is_shut_down {
+        if self.eof_pending {
             return Err(io::Error::new(
                 ErrorKind::Other,
                 "Already shut down".to_string(),
@@ -197,7 +209,11 @@ impl pipe::Sink for StreamTx {
     }
 
     async fn flush(&mut self) -> io::Result<()> {
-        self.tx.flush().await
+        self.tx.flush().await?;
+        if self.eof_pending {
+            self.tx.shutdown().await?;
+        }
+        Ok(())
     }
 }
 

@@ -87,8 +87,9 @@ where
 impl<IO: AsyncRead + AsyncWrite + Send + Unpin> HttpCodec for Http2Codec<IO> {
     async fn listen(&mut self) -> io::Result<Option<Box<dyn http_codec::Stream>>> {
         if let State::Handshake(handshake) = &mut self.state {
+            log_id!(trace, self.parent_id_chain, "H2 handshake in progress");
             self.state = State::Established(handshake.await.map_err(h2_to_io_error)?);
-            log_id!(trace, self.parent_id_chain, "HTTP2 connection established");
+            log_id!(trace, self.parent_id_chain, "H2 connection established");
         }
 
         let session = match &mut self.state {
@@ -96,6 +97,7 @@ impl<IO: AsyncRead + AsyncWrite + Send + Unpin> HttpCodec for Http2Codec<IO> {
             State::Established(s) => s,
         };
 
+        log_id!(trace, self.parent_id_chain, "H2 waiting for stream");
         match session.accept().await {
             Some(Ok((request, respond))) => {
                 let (request, rx) = request.into_parts();
@@ -106,7 +108,12 @@ impl<IO: AsyncRead + AsyncWrite + Send + Unpin> HttpCodec for Http2Codec<IO> {
                 // @note: [`h2::StreamId`] cannot be converted to raw integer, so just log it
                 //        to have a link between stream and out own generated IDs in the logs
                 // @note: could be worked around by allowing any id type in the id chain
-                log_id!(debug, id, "H2 stream id: {:?}", rx.stream_id());
+                log_id!(
+                    debug,
+                    id,
+                    "H2 stream accepted, stream_id: {:?}",
+                    rx.stream_id()
+                );
                 Ok(Some(Box::new(Stream {
                     request: Request {
                         request,
@@ -117,25 +124,64 @@ impl<IO: AsyncRead + AsyncWrite + Send + Unpin> HttpCodec for Http2Codec<IO> {
                     respond: Respond { tx: respond, id },
                 })))
             }
-            Some(Err(e)) if e.is_io() => Err(e.into_io().unwrap()),
-            Some(Err(e)) if e.reason() == Some(Reason::NO_ERROR) => Ok(None),
-            Some(Err(e)) => Err(h2_to_io_error(e)),
-            None => Ok(None),
+            Some(Err(e)) if e.is_io() => {
+                log_id!(trace, self.parent_id_chain, "H2 stream accept IO error");
+                Err(e.into_io().unwrap())
+            }
+            Some(Err(e)) if e.reason() == Some(Reason::NO_ERROR) => {
+                log_id!(
+                    trace,
+                    self.parent_id_chain,
+                    "H2 connection closed gracefully"
+                );
+                Ok(None)
+            }
+            Some(Err(e)) => {
+                log_id!(
+                    trace,
+                    self.parent_id_chain,
+                    "H2 stream accept error: {:?}",
+                    e.reason()
+                );
+                Err(h2_to_io_error(e))
+            }
+            None => {
+                log_id!(trace, self.parent_id_chain, "H2 no more streams");
+                Ok(None)
+            }
         }
     }
 
     async fn graceful_shutdown(&mut self) -> io::Result<()> {
         let session = match &mut self.state {
-            State::Handshake(_) => return Ok(()),
+            State::Handshake(_) => {
+                log_id!(
+                    trace,
+                    self.parent_id_chain,
+                    "H2 graceful shutdown (handshake state)"
+                );
+                return Ok(());
+            }
             State::Established(s) => s,
         };
 
+        log_id!(
+            trace,
+            self.parent_id_chain,
+            "H2 initiating graceful shutdown"
+        );
         session.graceful_shutdown();
 
         loop {
             match session.accept().await {
-                None => break Ok(()),
-                Some(Err(e)) if e.is_io() => break Err(e.into_io().unwrap()),
+                None => {
+                    log_id!(trace, self.parent_id_chain, "H2 graceful shutdown complete");
+                    break Ok(());
+                }
+                Some(Err(e)) if e.is_io() => {
+                    log_id!(trace, self.parent_id_chain, "H2 graceful shutdown IO error");
+                    break Err(e.into_io().unwrap());
+                }
                 Some(_) => continue,
             }
         }
@@ -193,11 +239,24 @@ impl pipe::Source for RequestStream {
     }
 
     async fn read(&mut self) -> io::Result<pipe::Data> {
+        log_id!(trace, self.id, "H2 stream reading data");
         match self.rx.data().await {
-            None => Ok(pipe::Data::Eof),
-            Some(Ok(chunk)) => Ok(pipe::Data::Chunk(chunk)),
-            Some(Err(e)) if e.reason().is_none_or(|r| r == Reason::NO_ERROR) => Ok(pipe::Data::Eof),
-            Some(Err(e)) => Err(h2_to_io_error(e)),
+            None => {
+                log_id!(trace, self.id, "H2 stream read EOF");
+                Ok(pipe::Data::Eof)
+            }
+            Some(Ok(chunk)) => {
+                log_id!(trace, self.id, "H2 stream read {} bytes", chunk.len());
+                Ok(pipe::Data::Chunk(chunk))
+            }
+            Some(Err(e)) if e.reason().is_none_or(|r| r == Reason::NO_ERROR) => {
+                log_id!(trace, self.id, "H2 stream read EOF (NO_ERROR)");
+                Ok(pipe::Data::Eof)
+            }
+            Some(Err(e)) => {
+                log_id!(trace, self.id, "H2 stream read error: {:?}", e.reason());
+                Err(h2_to_io_error(e))
+            }
         }
     }
 
@@ -220,10 +279,10 @@ impl http_codec::PendingRespond for Respond {
         eof: bool,
     ) -> io::Result<Box<dyn http_codec::RespondedStreamSink>> {
         log_id!(
-            debug,
+            trace,
             self.id,
-            "Sending response: {:?} (eof={})",
-            response,
+            "H2 sending response: status={} (eof={})",
+            response.status,
             eof
         );
 
@@ -232,6 +291,7 @@ impl http_codec::PendingRespond for Respond {
             .send_response(http::Response::from_parts(response, ()), eof)
             .map_err(h2_to_io_error)?;
 
+        log_id!(trace, self.id, "H2 response sent successfully");
         Ok(Box::new(RespondStream { tx, id: self.id }))
     }
 }
@@ -273,20 +333,31 @@ impl pipe::Sink for RespondStream {
     }
 
     fn write(&mut self, mut data: Bytes) -> io::Result<Bytes> {
+        let original_len = data.len();
         self.tx.reserve_capacity(data.len());
+        let to_send = self.tx.capacity();
         self.tx
-            .send_data(data.split_to(self.tx.capacity()), false)
+            .send_data(data.split_to(to_send), false)
             .map_err(h2_to_io_error)?;
+        log_id!(
+            trace,
+            self.id,
+            "H2 stream wrote {}/{} bytes",
+            to_send,
+            original_len
+        );
         Ok(data)
     }
 
     fn eof(&mut self) -> io::Result<()> {
+        log_id!(trace, self.id, "H2 stream sending EOF");
         self.tx
             .send_data(Bytes::new(), true)
             .map_err(h2_to_io_error)
     }
 
     async fn wait_writable(&mut self) -> io::Result<()> {
+        log_id!(trace, self.id, "H2 stream waiting for writable");
         WaitWritable {
             stream: &mut self.tx,
         }

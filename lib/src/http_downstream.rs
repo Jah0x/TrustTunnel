@@ -95,6 +95,13 @@ impl Downstream for HttpDownstream {
             let request = stream.request().request();
             let stream_id = stream.id();
             log_id!(
+                trace,
+                stream_id,
+                "HTTP downstream received request: {} {}",
+                request.method,
+                request.uri
+            );
+            log_id!(
                 debug,
                 stream_id,
                 "Received request: {:?}",
@@ -104,14 +111,23 @@ impl Downstream for HttpDownstream {
             let protocol = self.protocol();
             let settings = self.core_settings.clone();
             let shutdown = self.shutdown.clone();
-            match self.request_demux.select(self.protocol(), request) {
+            let channel = self.request_demux.select(self.protocol(), request);
+            log_id!(
+                trace,
+                stream_id,
+                "HTTP downstream routing to channel: {:?}",
+                channel
+            );
+            match channel {
                 net_utils::Channel::Tunnel => {
+                    log_id!(trace, stream_id, "HTTP downstream: tunnel request");
                     break Ok(Some(Box::new(PendingRequest {
                         stream,
                         id: stream_id,
-                    })))
+                    })));
                 }
                 net_utils::Channel::Ping => {
+                    log_id!(trace, stream_id, "HTTP downstream: ping request");
                     tokio::spawn(async move {
                         http_ping_handler::listen(
                             shutdown.clone(),
@@ -123,6 +139,7 @@ impl Downstream for HttpDownstream {
                     });
                 }
                 net_utils::Channel::Speedtest => {
+                    log_id!(trace, stream_id, "HTTP downstream: speedtest request");
                     tokio::spawn(async move {
                         http_speedtest_handler::listen(
                             shutdown.clone(),
@@ -134,6 +151,7 @@ impl Downstream for HttpDownstream {
                     });
                 }
                 net_utils::Channel::ReverseProxy => {
+                    log_id!(trace, stream_id, "HTTP downstream: reverse proxy request");
                     tokio::spawn({
                         let sni = self.tls_domain.clone();
                         async move {

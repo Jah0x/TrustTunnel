@@ -90,6 +90,7 @@ impl Tunnel {
 
     async fn listen_inner(&mut self) -> io::Result<()> {
         loop {
+            log_id!(trace, self.id, "Tunnel waiting for request");
             let request = match tokio::time::timeout(
                 self.context.settings.client_listener_timeout,
                 self.downstream.listen(),
@@ -100,9 +101,18 @@ impl Tunnel {
                     log_id!(debug, self.id, "Tunnel closed gracefully");
                     return Ok(());
                 }
-                Ok(Ok(Some(r))) => r,
-                Ok(Err(e)) => return Err(e),
-                Err(_) => return Err(io::Error::from(ErrorKind::TimedOut)),
+                Ok(Ok(Some(r))) => {
+                    log_id!(trace, self.id, "Tunnel received request");
+                    r
+                }
+                Ok(Err(e)) => {
+                    log_id!(trace, self.id, "Tunnel listen error: {}", e);
+                    return Err(e);
+                }
+                Err(_) => {
+                    log_id!(trace, self.id, "Tunnel listen timeout");
+                    return Err(io::Error::from(ErrorKind::TimedOut));
+                }
             };
 
             let context = self.context.clone();
@@ -121,6 +131,7 @@ impl Tunnel {
 
             tokio::spawn(async move {
                 let request_id = request.id();
+                log_id!(trace, request_id, "Processing tunnel request");
                 let auth_info = request
                     .auth_info()
                     .map(|x| x.map(authentication::Source::into_owned));
@@ -162,9 +173,17 @@ impl Tunnel {
                     }
                 };
 
+                log_id!(
+                    trace,
+                    request_id,
+                    "Authentication complete, promoting request"
+                );
                 match request.promote_to_next_state() {
-                    Ok(None) => (), // skip forwarder authentication for health check requests
+                    Ok(None) => {
+                        log_id!(trace, request_id, "Health check request completed");
+                    }
                     Ok(Some(PendingDemultiplexedRequest::TcpConnect(request))) => {
+                        log_id!(trace, request_id, "Handling TCP connect request");
                         if let Err((request, message, e)) = Tunnel::on_tcp_connect_request(
                             context,
                             forwarder,
@@ -182,6 +201,7 @@ impl Tunnel {
                         }
                     }
                     Ok(Some(PendingDemultiplexedRequest::DatagramMultiplexer(request))) => {
+                        log_id!(trace, request_id, "Handling datagram multiplexer request");
                         if let Err((request, message, e)) = Tunnel::on_datagram_mux_request(
                             context,
                             forwarder,
@@ -222,8 +242,12 @@ impl Tunnel {
         ),
     > {
         let request_id = request.id();
+        log_id!(trace, request_id, "TCP connect: extracting destination");
         let destination = match request.destination() {
-            Ok(d) => d,
+            Ok(d) => {
+                log_id!(trace, request_id, "TCP connect: destination={:?}", d);
+                d
+            }
             Err(e) => {
                 return Err((
                     Some(request),
@@ -250,6 +274,7 @@ impl Tunnel {
             user_agent: request.user_agent(),
         };
 
+        log_id!(trace, request_id, "TCP connect: connecting to peer");
         let connector = forwarder.lock().unwrap().tcp_connector();
         let (fwd_rx, fwd_tx) = match tokio::time::timeout(
             context.settings.connection_establishment_timeout,
@@ -258,13 +283,32 @@ impl Tunnel {
         .await
         .unwrap_or(Err(ConnectionError::Timeout))
         {
-            Ok(x) => x,
+            Ok(x) => {
+                log_id!(
+                    trace,
+                    request_id,
+                    "TCP connect: peer connection established"
+                );
+                x
+            }
             Err(e) => return Err((Some(request), "Connection to peer failed", e)),
         };
 
         log_id!(debug, request_id, "Successfully connected to {:?}", meta);
+        log_id!(
+            trace,
+            request_id,
+            "TCP connect: promoting downstream request"
+        );
         let (dstr_rx, dstr_tx) = match request.promote_to_next_state() {
-            Ok(x) => x,
+            Ok(x) => {
+                log_id!(
+                    trace,
+                    request_id,
+                    "TCP connect: downstream ready, starting pipe"
+                );
+                x
+            }
             Err(e) => return Err((None, "Failed to complete request", ConnectionError::Io(e))),
         };
 
@@ -274,15 +318,19 @@ impl Tunnel {
             update_metrics,
         );
 
+        log_id!(trace, request_id, "TCP connect: pipe exchange started");
         match pipe
             .exchange(context.settings.tcp_connections_timeout)
             .await
         {
             Ok(_) => {
-                log_id!(trace, request_id, "Both ends closed gracefully");
+                log_id!(trace, request_id, "TCP connect: pipe closed gracefully");
                 Ok(())
             }
-            Err(e) => Err((None, "Error on pipe", ConnectionError::Io(e))),
+            Err(e) => {
+                log_id!(trace, request_id, "TCP connect: pipe error: {}", e);
+                Err((None, "Error on pipe", ConnectionError::Io(e)))
+            }
         }
     }
 

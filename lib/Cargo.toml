@@ -20,7 +20,7 @@ bytes = "1.4.0"
 chrono = { version = "0.4.26", default-features = false, features = ["clock"] }
 dynfmt = { version = "0.1.5", features = ["curly"], default-features = false }
 futures = "0.3.28"
-h2 = "0.3.20"
+h2 = "0.3.26"
 hex = "0.4.3"
 http = "0.2.9"
 httparse = "1.8.0"
@@ -37,6 +37,7 @@ rustls = { version = "0.21.2", features = ["logging"] }
 rustls-pki-types = "1.13.2"
 serde = "1.0.164"
 smallvec = "1.10.0"
+socket2 = "0.5"
 tokio = { version = "1.42", features = ["net", "rt", "sync", "time", "macros", "rt-multi-thread"] }
 tokio-rustls = "0.24.1"
 toml_edit = "0.19.10"
