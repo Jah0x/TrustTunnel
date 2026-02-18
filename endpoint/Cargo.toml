@@ -11,6 +11,7 @@ doctest = false
 [dependencies]
 clap = "4.5"
 console-subscriber = { version = "0.1.9", optional = true }
+hex = "0.4"
 log = "0.4.19"
 nix = { version = "0.28.0", features = ["resource"] }
 sentry = { version = "0.46.0", default-features = false, features = ["backtrace", "panic", "reqwest", "rustls", "contexts"] }
