@@ -415,6 +415,52 @@ trusttunnel_client.exe -c trusttunnel_client.toml
 
 Administrator privileges are required to set up routes and the TUN interface.
 
+## Local build and Docker image
+
+### Build endpoint binary locally
+
+```bash
+cargo build --manifest-path endpoint/Cargo.toml --release
+```
+
+The release binary will be available at:
+
+```bash
+./target/release/trusttunnel_endpoint
+```
+
+### Build Docker image locally
+
+```bash
+docker build -t trusttunnel-endpoint:local .
+```
+
+Run the container by mounting your configuration files:
+
+```bash
+docker run --rm -p 8443:8443 \
+  -v /path/to/vpn.toml:/etc/trusttunnel/vpn.toml:ro \
+  -v /path/to/hosts.toml:/etc/trusttunnel/hosts.toml:ro \
+  trusttunnel-endpoint:local
+```
+
+### Use image from GHCR
+
+Published image tags:
+
+- `ghcr.io/<owner>/trusttunnel-endpoint:latest`
+- `ghcr.io/<owner>/trusttunnel-endpoint:v<version>`
+
+Pull and run:
+
+```bash
+docker pull ghcr.io/<owner>/trusttunnel-endpoint:latest
+docker run --rm -p 8443:8443 \
+  -v /path/to/vpn.toml:/etc/trusttunnel/vpn.toml:ro \
+  -v /path/to/hosts.toml:/etc/trusttunnel/hosts.toml:ro \
+  ghcr.io/<owner>/trusttunnel-endpoint:latest
+```
+
 ## See Also
 
 - [CONFIGURATION.md](CONFIGURATION.md) - Configuration documentation
