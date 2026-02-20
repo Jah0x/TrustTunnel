@@ -109,6 +109,18 @@ udp_connections_timeout_secs = 300
 # Path to credentials file
 credentials_file = "credentials.toml"
 
+[auth]
+mode = "credentials" # credentials | jwt | mixed
+
+[auth.jwt]
+algorithm = "RS256" # RS256 | HS256
+issuer = "https://lk.securesoft.dev" # optional
+audience = "trusttunnel" # optional
+leeway_seconds = 30
+username_claim = "sub"
+public_key_path = "jwt/public.pem" # required for RS256
+# hmac_secret_env = "TRUSTTUNNEL_JWT_SECRET" # required for HS256
+
 # Path to rules file (optional)
 rules_file = "rules.toml"
 
@@ -249,6 +261,25 @@ action = "deny"
 | `udp_connections_timeout_secs` | Integer | `300` | UDP connection timeout (5 minutes) |
 | `credentials_file` | String | - | Path to credentials file |
 | `rules_file` | String | - | Path to rules file (optional) |
+| `auth.mode` | String | `credentials` | Auth mode: `credentials`, `jwt`, or `mixed` |
+
+### JWT Authentication Settings (`[auth.jwt]`)
+
+| Setting | Type | Default | Description |
+| ------- | ---- | ------- | ----------- |
+| `algorithm` | String | - | JWT algorithm: `RS256` or `HS256` |
+| `issuer` | String | - | Optional `iss` claim check |
+| `audience` | String | - | Optional `aud` claim check |
+| `leeway_seconds` | Integer | `30` | Allowed clock skew for `exp` |
+| `username_claim` | String | `sub` | Claim that must match Basic username |
+| `public_key_path` | String | - | PEM public key path for RS256 |
+| `hmac_secret_env` | String | - | Env var containing HMAC secret for HS256 |
+
+In JWT mode, the client still sends Basic auth, but password must be the JWT token:
+
+`proxy-authorization: Basic base64("username:JWT_TOKEN")`
+
+`username` from Basic must strictly match the configured `username_claim` (default: `sub`).
 
 ### Listen Protocol Settings
 
