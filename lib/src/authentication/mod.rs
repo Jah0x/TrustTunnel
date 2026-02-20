@@ -3,8 +3,8 @@ pub mod jwt;
 pub mod mixed;
 pub mod registry_based;
 
-use crate::log_utils;
 use crate::log_id;
+use crate::log_utils;
 use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
 use base64::Engine;
 use std::borrow::Cow;

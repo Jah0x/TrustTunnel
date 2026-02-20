@@ -1,7 +1,7 @@
 name: Run tests and lint
 
 env:
-  RUST_CHANNEL: 1.85
+  RUST_CHANNEL: 1.85.1
 
 on:
   push:
