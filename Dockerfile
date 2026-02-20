@@ -3,6 +3,17 @@
 FROM rust:1.85.1-bookworm AS builder
 WORKDIR /workspace
 
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        clang \
+        cmake \
+        libclang-dev \
+        make \
+        perl \
+        pkg-config; \
+    rm -rf /var/lib/apt/lists/*
+
 COPY . .
 
 RUN set -eux; \
