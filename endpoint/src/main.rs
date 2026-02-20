@@ -191,7 +191,10 @@ fn main() {
     .expect("Couldn't parse the settings file");
 
     if settings.get_clients().is_empty()
-        && matches!(settings.get_auth().get_mode(), &AuthMode::Credentials | &AuthMode::Mixed)
+        && matches!(
+            settings.get_auth().get_mode(),
+            &AuthMode::Credentials | &AuthMode::Mixed
+        )
         && settings.get_listen_address().ip().is_loopback()
     {
         warn!(
@@ -329,15 +332,15 @@ fn main() {
 
     let shutdown = Shutdown::new();
     let authenticator: Option<Arc<dyn Authenticator>> = {
-        let auth_provider: Option<Box<dyn AuthProvider>> = match settings.get_auth().get_mode() {
-            &AuthMode::Credentials => {
+        let auth_provider: Option<Box<dyn AuthProvider>> = match *settings.get_auth().get_mode() {
+            AuthMode::Credentials => {
                 if settings.get_clients().is_empty() {
                     None
                 } else {
                     Some(Box::new(CredentialsAuth::new(settings.get_clients())))
                 }
             }
-            &AuthMode::Jwt => {
+            AuthMode::Jwt => {
                 let jwt_settings = settings
                     .get_auth()
                     .get_jwt()
@@ -348,7 +351,7 @@ fn main() {
                         .expect("Couldn't initialize JWT auth"),
                 ))
             }
-            &AuthMode::Mixed => {
+            AuthMode::Mixed => {
                 let jwt_settings = settings
                     .get_auth()
                     .get_jwt()
@@ -364,7 +367,9 @@ fn main() {
             }
         };
 
-        auth_provider.map(|provider| Arc::new(ProxyBasicAuthenticator::new(provider)) as Arc<dyn Authenticator>)
+        auth_provider.map(|provider| {
+            Arc::new(ProxyBasicAuthenticator::new(provider)) as Arc<dyn Authenticator>
+        })
     };
     let core = Arc::new(
         Core::new(

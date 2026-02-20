@@ -1,4 +1,6 @@
-use crate::authentication::{AuthError, AuthProvider, Authenticator, ProxyBasicAuthenticator, Source, Status};
+use crate::authentication::{
+    AuthError, AuthProvider, Authenticator, ProxyBasicAuthenticator, Source, Status,
+};
 use crate::log_utils;
 use serde::Deserialize;
 use std::collections::HashMap;

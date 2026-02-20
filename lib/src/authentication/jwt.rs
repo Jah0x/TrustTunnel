@@ -83,7 +83,8 @@ impl AuthProvider for JwtAuth {
         let signing_input = format!("{}.{}", header_b64, payload_b64);
         match &self.verifier {
             JwtVerifier::Rs256(public_key_der) => {
-                let key = PKey::public_key_from_pem(public_key_der).map_err(|_| AuthError::InvalidToken)?;
+                let key = PKey::public_key_from_pem(public_key_der)
+                    .map_err(|_| AuthError::InvalidToken)?;
                 let mut verifier = Verifier::new(MessageDigest::sha256(), &key)
                     .map_err(|_| AuthError::InvalidToken)?;
                 verifier
@@ -243,26 +244,118 @@ IwIDAQAB
 -----END PUBLIC KEY-----
 ";
 
-    fn now() -> u64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() }
-    fn b64(x:&str)->String{ URL_SAFE_NO_PAD.encode(x) }
+    fn now() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+    fn b64(x: &str) -> String {
+        URL_SAFE_NO_PAD.encode(x)
+    }
 
-    fn hs_token(payload:&str, secret:&str)->String{
-        let h=b64(r#"{"alg":"HS256","typ":"JWT"}"#); let p=b64(payload); let s=format!("{}.{}",h,p);
-        let key=hmac::Key::new(hmac::HMAC_SHA256,secret.as_bytes());
-        let sig=hmac::sign(&key,s.as_bytes()); format!("{}.{}",s,URL_SAFE_NO_PAD.encode(sig.as_ref()))
+    fn hs_token(payload: &str, secret: &str) -> String {
+        let h = b64(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let p = b64(payload);
+        let s = format!("{}.{}", h, p);
+        let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+        let sig = hmac::sign(&key, s.as_bytes());
+        format!("{}.{}", s, URL_SAFE_NO_PAD.encode(sig.as_ref()))
     }
     const VALID_RS_TOKEN: &str = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhbGljZSIsImV4cCI6NDEwMjQ0NDgwMCwiaXNzIjoiaXNzIiwiYXVkIjoiYXVkIn0.MZSnq0BV1CnULzQPL2q1MC1TZMizFNrrvDYrheEcHWf_0OovYInZPTohv2-V-KAIY0rE2_5N5XcWOEe2k4hkVOca9gcZtd2fGiAKEQw-RZjNAxaxSsBbNLLvATgUHlKev1dl5DPUMTuYQXnJMKt7Lr2TE_HYTGut7BbfeDrBY5_CXTm9wBTvSKgZdWuET8Hhi4v04FrMbFdXNarQy9vMPcjxPFhmTHNj3ovK8S_71IbS6iFndi6Duqz-j-UaeU0T6-aVNXqmzbIKyiydSpLfy538CQldYwju8dFgK__vvIaaq6FKbNwtWLY4zVSBF41jA-J4eWGcnonW7C96mj4ATA";
 
-    #[test] fn valid_rs256_token(){ let f=tempfile::NamedTempFile::new().unwrap(); fs::write(f.path(),TEST_PUBLIC_KEY).unwrap();
-        let auth=JwtAuth::from_config(&JwtAuthConfig{algorithm:JwtAlgorithm::RS256,issuer:Some("iss".into()),audience:Some("aud".into()),leeway_seconds:0,username_claim:"sub".into(),public_key_path:Some(f.path().to_string_lossy().to_string()),hmac_secret_env:None}).unwrap();
-        assert!(auth.authenticate("alice", VALID_RS_TOKEN).is_ok()); }
+    #[test]
+    fn valid_rs256_token() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        fs::write(f.path(), TEST_PUBLIC_KEY).unwrap();
+        let auth = JwtAuth::from_config(&JwtAuthConfig {
+            algorithm: JwtAlgorithm::RS256,
+            issuer: Some("iss".into()),
+            audience: Some("aud".into()),
+            leeway_seconds: 0,
+            username_claim: "sub".into(),
+            public_key_path: Some(f.path().to_string_lossy().to_string()),
+            hmac_secret_env: None,
+        })
+        .unwrap();
+        assert!(auth.authenticate("alice", VALID_RS_TOKEN).is_ok());
+    }
 
-    #[test] fn jwt_failures(){ std::env::set_var("JWT_SECRET","secret"); let auth=JwtAuth::from_config(&JwtAuthConfig{algorithm:JwtAlgorithm::HS256,issuer:Some("iss".into()),audience:Some("aud".into()),leeway_seconds:0,username_claim:"sub".into(),public_key_path:None,hmac_secret_env:Some("JWT_SECRET".into())}).unwrap();
-        assert!(auth.authenticate("alice",&hs_token(&format!(r#"{{"sub":"alice","exp":{},"iss":"iss","aud":"aud"}}"#,now()-1),"secret")).is_err());
-        assert!(auth.authenticate("alice",&hs_token(&format!(r#"{{"sub":"bob","exp":{},"iss":"iss","aud":"aud"}}"#,now()+300),"secret")).is_err());
-        assert!(auth.authenticate("alice",&hs_token(&format!(r#"{{"sub":"alice","exp":{},"iss":"bad","aud":"aud"}}"#,now()+300),"secret")).is_err());
-        assert!(auth.authenticate("alice",&hs_token(&format!(r#"{{"sub":"alice","exp":{},"iss":"iss","aud":"bad"}}"#,now()+300),"secret")).is_err());
-        assert!(auth.authenticate("alice",&hs_token(r#"{"sub":"alice","iss":"iss","aud":"aud"}"#,"secret")).is_err());
-        let mut bad=hs_token(&format!(r#"{{"sub":"alice","exp":{},"iss":"iss","aud":"aud"}}"#,now()+300),"secret"); bad.push('x');
-        assert!(auth.authenticate("alice",&bad).is_err()); }
+    #[test]
+    fn jwt_failures() {
+        std::env::set_var("JWT_SECRET", "secret");
+        let auth = JwtAuth::from_config(&JwtAuthConfig {
+            algorithm: JwtAlgorithm::HS256,
+            issuer: Some("iss".into()),
+            audience: Some("aud".into()),
+            leeway_seconds: 0,
+            username_claim: "sub".into(),
+            public_key_path: None,
+            hmac_secret_env: Some("JWT_SECRET".into()),
+        })
+        .unwrap();
+        assert!(auth
+            .authenticate(
+                "alice",
+                &hs_token(
+                    &format!(
+                        r#"{{"sub":"alice","exp":{},"iss":"iss","aud":"aud"}}"#,
+                        now() - 1
+                    ),
+                    "secret"
+                )
+            )
+            .is_err());
+        assert!(auth
+            .authenticate(
+                "alice",
+                &hs_token(
+                    &format!(
+                        r#"{{"sub":"bob","exp":{},"iss":"iss","aud":"aud"}}"#,
+                        now() + 300
+                    ),
+                    "secret"
+                )
+            )
+            .is_err());
+        assert!(auth
+            .authenticate(
+                "alice",
+                &hs_token(
+                    &format!(
+                        r#"{{"sub":"alice","exp":{},"iss":"bad","aud":"aud"}}"#,
+                        now() + 300
+                    ),
+                    "secret"
+                )
+            )
+            .is_err());
+        assert!(auth
+            .authenticate(
+                "alice",
+                &hs_token(
+                    &format!(
+                        r#"{{"sub":"alice","exp":{},"iss":"iss","aud":"bad"}}"#,
+                        now() + 300
+                    ),
+                    "secret"
+                )
+            )
+            .is_err());
+        assert!(auth
+            .authenticate(
+                "alice",
+                &hs_token(r#"{"sub":"alice","iss":"iss","aud":"aud"}"#, "secret")
+            )
+            .is_err());
+        let mut bad = hs_token(
+            &format!(
+                r#"{{"sub":"alice","exp":{},"iss":"iss","aud":"aud"}}"#,
+                now() + 300
+            ),
+            "secret",
+        );
+        bad.push('x');
+        assert!(auth.authenticate("alice", &bad).is_err());
+    }
 }

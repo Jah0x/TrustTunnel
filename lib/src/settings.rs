@@ -7,8 +7,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::{authentication, rules, utils};
-use authentication::registry_based::Client;
 use authentication::jwt::{JwtAlgorithm, JwtAuthConfig};
+use authentication::registry_based::Client;
 #[cfg(feature = "rt_doc")]
 use macros::{Getter, RuntimeDoc};
 use serde::{Deserialize, Serialize};
