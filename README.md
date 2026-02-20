@@ -53,6 +53,10 @@ The TrustTunnel project includes the VPN endpoint (this repository), the
 [library and CLI for the client][trusttunnel-client],
 and the [GUI application][trusttunnel-flutter-client].
 
+For a detailed Russian-language walkthrough of endpoint startup arguments,
+environment variables, and JWT/mixed auth run modes, see
+[ENDPOINT_RUN_GUIDE_RU.md](./ENDPOINT_RUN_GUIDE_RU.md).
+
 [adguard-vpn]: https://adguard-vpn.com
 [trusttunnel-client]: https://github.com/TrustTunnel/TrustTunnelClient
 [trusttunnel-flutter-client]: https://github.com/TrustTunnel/TrustTunnelFlutterClient
