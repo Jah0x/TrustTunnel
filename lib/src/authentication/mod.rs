@@ -1,6 +1,12 @@
+pub mod credentials;
+pub mod jwt;
+pub mod mixed;
 pub mod registry_based;
 
 use crate::log_utils;
+use crate::log_id;
+use base64::engine::general_purpose::STANDARD as BASE64_ENGINE;
+use base64::Engine;
 use std::borrow::Cow;
 
 /// Authentication request source
@@ -26,6 +32,65 @@ pub enum Status {
 pub trait Authenticator: Send + Sync {
     /// Authenticate client
     fn authenticate(&self, source: &Source<'_>, log_id: &log_utils::IdChain<u64>) -> Status;
+}
+
+#[derive(Debug)]
+pub enum AuthError {
+    InvalidCredentials,
+    InvalidToken,
+    InvalidAuthHeader,
+    Internal,
+}
+
+pub trait AuthProvider: Send + Sync {
+    fn authenticate(&self, username: &str, password: &str) -> Result<(), AuthError>;
+}
+
+pub struct ProxyBasicAuthenticator {
+    provider: Box<dyn AuthProvider>,
+}
+
+impl ProxyBasicAuthenticator {
+    pub fn new(provider: Box<dyn AuthProvider>) -> Self {
+        Self { provider }
+    }
+}
+
+impl Authenticator for ProxyBasicAuthenticator {
+    fn authenticate(&self, source: &Source<'_>, log_id: &log_utils::IdChain<u64>) -> Status {
+        let basic = match source {
+            Source::ProxyBasic(value) => value,
+            _ => return Status::Reject,
+        };
+
+        let decoded = match BASE64_ENGINE.decode(basic.as_ref()) {
+            Ok(value) => value,
+            Err(_) => return Status::Reject,
+        };
+
+        let credentials = match String::from_utf8(decoded) {
+            Ok(value) => value,
+            Err(_) => return Status::Reject,
+        };
+
+        let mut split = credentials.splitn(2, ':');
+        let username = match split.next() {
+            Some(value) if !value.is_empty() => value,
+            _ => return Status::Reject,
+        };
+        let password = match split.next() {
+            Some(value) => value,
+            None => return Status::Reject,
+        };
+
+        match self.provider.authenticate(username, password) {
+            Ok(()) => Status::Pass,
+            Err(err) => {
+                log_id!(debug, log_id, "Authentication rejected: {:?}", err);
+                Status::Reject
+            }
+        }
+    }
 }
 
 impl Source<'_> {

@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use crate::{authentication, rules, utils};
 use authentication::registry_based::Client;
+use authentication::jwt::{JwtAlgorithm, JwtAuthConfig};
 #[cfg(feature = "rt_doc")]
 use macros::{Getter, RuntimeDoc};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,7 @@ pub enum ValidationError {
     RulesFile(String),
     /// No credentials configured while listening on a public address
     NoCredentialsOnPublicAddress,
+    MissingJwtAuthConfig,
 }
 
 impl Debug for ValidationError {
@@ -48,6 +50,10 @@ impl Debug for ValidationError {
                 f,
                 "No credentials configured (credentials_file is missing) while listening on a public address. \
                 This is a security risk. Either configure credentials or use a loopback address (127.0.0.1 or ::1)"
+            ),
+            Self::MissingJwtAuthConfig => write!(
+                f,
+                "JWT auth mode is enabled, but [auth.jwt] configuration is missing or invalid"
             ),
         }
     }
@@ -151,6 +157,8 @@ pub struct Settings {
     #[serde(rename(deserialize = "credentials_file"))]
     #[serde(deserialize_with = "deserialize_clients")]
     pub(crate) clients: Vec<Client>,
+    #[serde(default)]
+    pub(crate) auth: AuthSettings,
     /// The reverse proxy settings.
     /// With this one set up the endpoint does TLS termination on such connections and
     /// translates HTTP/x traffic into HTTP/1.1 protocol towards the server and back
@@ -185,6 +193,75 @@ pub struct Settings {
     /// https://github.com/serde-rs/serde/issues/642
     #[serde(skip)]
     built: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "rt_doc", derive(Getter, RuntimeDoc))]
+pub struct AuthSettings {
+    #[serde(default)]
+    pub(crate) mode: AuthMode,
+    #[serde(default)]
+    pub(crate) jwt: Option<JwtSettings>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq)]
+pub enum AuthMode {
+    #[default]
+    #[serde(rename = "credentials")]
+    Credentials,
+    #[serde(rename = "jwt")]
+    Jwt,
+    #[serde(rename = "mixed")]
+    Mixed,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "rt_doc", derive(Getter, RuntimeDoc))]
+pub struct JwtSettings {
+    pub(crate) algorithm: JwtAlgorithm,
+    #[serde(default)]
+    pub(crate) issuer: Option<String>,
+    #[serde(default)]
+    pub(crate) audience: Option<String>,
+    #[serde(default = "JwtSettings::default_leeway_seconds")]
+    pub(crate) leeway_seconds: u64,
+    #[serde(default = "JwtSettings::default_username_claim")]
+    pub(crate) username_claim: String,
+    #[serde(default)]
+    pub(crate) public_key_path: Option<String>,
+    #[serde(default)]
+    pub(crate) hmac_secret_env: Option<String>,
+}
+
+impl JwtSettings {
+    fn default_leeway_seconds() -> u64 {
+        30
+    }
+
+    fn default_username_claim() -> String {
+        "sub".to_string()
+    }
+
+    pub fn to_auth_config(&self) -> JwtAuthConfig {
+        JwtAuthConfig {
+            algorithm: self.algorithm.clone(),
+            issuer: self.issuer.clone(),
+            audience: self.audience.clone(),
+            leeway_seconds: self.leeway_seconds,
+            username_claim: self.username_claim.clone(),
+            public_key_path: self.public_key_path.clone(),
+            hmac_secret_env: self.hmac_secret_env.clone(),
+        }
+    }
+}
+
+impl Default for AuthSettings {
+    fn default() -> Self {
+        Self {
+            mode: AuthMode::Credentials,
+            jwt: None,
+        }
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -492,8 +569,15 @@ impl Settings {
             return Err(ValidationError::ListenProtocols("Not set".into()));
         }
 
+        if matches!(self.auth.mode, AuthMode::Jwt | AuthMode::Mixed) && self.auth.jwt.is_none() {
+            return Err(ValidationError::MissingJwtAuthConfig);
+        }
+
         // Do not start the endpoint without credentials on a public address
-        if self.clients.is_empty() && !self.listen_address.ip().is_loopback() {
+        if matches!(self.auth.mode, AuthMode::Credentials | AuthMode::Mixed)
+            && self.clients.is_empty()
+            && !self.listen_address.ip().is_loopback()
+        {
             return Err(ValidationError::NoCredentialsOnPublicAddress);
         }
 
@@ -551,6 +635,7 @@ impl Default for Settings {
             udp_connections_timeout: Settings::default_udp_connections_timeout(),
             forward_protocol: Default::default(),
             clients: Default::default(),
+            auth: Default::default(),
             listen_protocols: ListenProtocolSettings {
                 http1: Some(Http1Settings::builder().build()),
                 http2: Some(Http2Settings::builder().build()),
@@ -810,6 +895,7 @@ impl SettingsBuilder {
                 forward_protocol: Default::default(),
                 listen_protocols: Default::default(),
                 clients: Default::default(),
+                auth: Default::default(),
                 reverse_proxy: None,
                 icmp: None,
                 metrics: Default::default(),

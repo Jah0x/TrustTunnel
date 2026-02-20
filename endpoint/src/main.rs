@@ -3,11 +3,13 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::signal;
-use trusttunnel::authentication::registry_based::RegistryBasedAuthenticator;
-use trusttunnel::authentication::Authenticator;
+use trusttunnel::authentication::jwt::JwtAuth;
+use trusttunnel::authentication::mixed::MixedAuth;
+use trusttunnel::authentication::registry_based::CredentialsAuth;
+use trusttunnel::authentication::{AuthProvider, Authenticator, ProxyBasicAuthenticator};
 use trusttunnel::client_config;
 use trusttunnel::core::Core;
-use trusttunnel::settings::Settings;
+use trusttunnel::settings::{AuthMode, Settings};
 use trusttunnel::shutdown::Shutdown;
 use trusttunnel::{log_utils, settings};
 
@@ -188,7 +190,10 @@ fn main() {
     )
     .expect("Couldn't parse the settings file");
 
-    if settings.get_clients().is_empty() && settings.get_listen_address().ip().is_loopback() {
+    if settings.get_clients().is_empty()
+        && matches!(settings.get_auth().get_mode(), &AuthMode::Credentials | &AuthMode::Mixed)
+        && settings.get_listen_address().ip().is_loopback()
+    {
         warn!(
             "No credentials configured (credentials_file is missing). \
             Anyone can connect to this endpoint. This is acceptable for local development \
@@ -323,12 +328,43 @@ fn main() {
     };
 
     let shutdown = Shutdown::new();
-    let authenticator: Option<Arc<dyn Authenticator>> = if !settings.get_clients().is_empty() {
-        Some(Arc::new(RegistryBasedAuthenticator::new(
-            settings.get_clients(),
-        )))
-    } else {
-        None
+    let authenticator: Option<Arc<dyn Authenticator>> = {
+        let auth_provider: Option<Box<dyn AuthProvider>> = match settings.get_auth().get_mode() {
+            &AuthMode::Credentials => {
+                if settings.get_clients().is_empty() {
+                    None
+                } else {
+                    Some(Box::new(CredentialsAuth::new(settings.get_clients())))
+                }
+            }
+            &AuthMode::Jwt => {
+                let jwt_settings = settings
+                    .get_auth()
+                    .get_jwt()
+                    .as_ref()
+                    .expect("[auth.jwt] must be configured for mode=jwt");
+                Some(Box::new(
+                    JwtAuth::from_config(&jwt_settings.to_auth_config())
+                        .expect("Couldn't initialize JWT auth"),
+                ))
+            }
+            &AuthMode::Mixed => {
+                let jwt_settings = settings
+                    .get_auth()
+                    .get_jwt()
+                    .as_ref()
+                    .expect("[auth.jwt] must be configured for mode=mixed");
+                Some(Box::new(MixedAuth::new(
+                    Box::new(
+                        JwtAuth::from_config(&jwt_settings.to_auth_config())
+                            .expect("Couldn't initialize JWT auth"),
+                    ),
+                    Box::new(CredentialsAuth::new(settings.get_clients())),
+                )))
+            }
+        };
+
+        auth_provider.map(|provider| Arc::new(ProxyBasicAuthenticator::new(provider)) as Arc<dyn Authenticator>)
     };
     let core = Arc::new(
         Core::new(
