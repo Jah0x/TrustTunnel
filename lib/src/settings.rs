@@ -1523,6 +1523,17 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
+    let mut seen_usernames = HashSet::new();
+    for (idx, client) in res.iter().enumerate() {
+        if !seen_usernames.insert(client.username.as_str()) {
+            return Err(serde::de::Error::custom(format!(
+                "Client #{}: duplicate username '{}'",
+                idx + 1,
+                client.username
+            )));
+        }
+    }
+
     Ok(res)
 }
 
@@ -1603,4 +1614,40 @@ where
 
 fn demangle_toml_string(x: String) -> String {
     x.replace('"', "").trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::de::value::{Error as ValueError, StringDeserializer};
+    use std::fs;
+
+    #[test]
+    fn rejects_duplicate_usernames_in_credentials_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let credentials_path = temp_dir.path().join("credentials.toml");
+        fs::write(
+            &credentials_path,
+            r#"
+[[client]]
+username = "alice"
+password = "first"
+
+[[client]]
+username = "alice"
+password = "second"
+"#,
+        )
+        .unwrap();
+
+        let path = credentials_path.to_str().unwrap().to_string();
+        let deserializer = StringDeserializer::<ValueError>::new(path);
+        let err = match super::deserialize_clients(deserializer) {
+            Ok(_) => panic!("duplicate usernames must fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("duplicate username 'alice'"),
+            "unexpected error: {err}"
+        );
+    }
 }
