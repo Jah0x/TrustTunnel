@@ -2,6 +2,16 @@
 
 This document provides context and instructions for AI agents working on the `Trusttunnel` codebase.
 
+## Mandatory AI Office Intake
+
+Every SecureSoft task in this repository MUST begin through
+`Securesoftdev/securesoft-ai-office`, including small fixes, documentation,
+tests, reviews, and release work. The AI Office director creates a bounded task
+packet, assigns one writable branch/worktree, and selects independent reviewers
+before edits. These local Rust, protocol, test, and release rules remain
+authoritative and may be stricter, but they may not bypass office intake or
+owner-controlled release authority.
+
 ## Project Overview
 
 TrustTunnel is an open-source VPN protocol endpoint originally developed by
