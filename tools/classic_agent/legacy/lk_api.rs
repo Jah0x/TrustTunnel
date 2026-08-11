@@ -29,6 +29,7 @@ pub struct LkApiClient {
 }
 
 impl LkApiClient {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: reqwest::Client,
         base_url: String,
