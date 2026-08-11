@@ -6004,6 +6004,7 @@ fn count_active_clients(credentials_file: &Path) -> Option<u64> {
 #[cfg(test)]
 mod runtime_status_tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn runtime_health_status_dead_when_process_unavailable() {
