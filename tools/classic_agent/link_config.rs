@@ -544,8 +544,9 @@ dns_servers = ["8.8.8.8", "1.1.1.1"]
         let path = std::env::temp_dir().join("missing-link-config.toml");
         let err = LinkGenerationConfig::load_from_file_or_legacy_env(&path, "node-a").unwrap_err();
         assert!(err.contains("file-based link config is required"));
-        assert!(err
-            .contains("required fields [node_external_id, address_host, port, cert_domain, protocol]"));
+        assert!(err.contains(
+            "required fields [node_external_id, address_host, port, cert_domain, protocol]"
+        ));
     }
 
     #[test]
@@ -596,8 +597,9 @@ protocol = "http2"
 
         let err = LinkGenerationConfig::load_from_file_or_legacy_env(&path, "node-a").unwrap_err();
         assert!(err.contains("missing field `node_external_id`"));
-        assert!(err
-            .contains("required fields [node_external_id, address_host, port, cert_domain, protocol]"));
+        assert!(err.contains(
+            "required fields [node_external_id, address_host, port, cert_domain, protocol]"
+        ));
     }
 
     #[test]

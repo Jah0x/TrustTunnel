@@ -15,12 +15,13 @@ use credentials_inventory::{
 };
 use exporter::{EndpointExportOptions, EndpointLinkExporter};
 use legacy::lk_api::{
-    Account, AccountExportPayload, HeartbeatPayload, HeartbeatStats, LkApiClient,
-    NodeMetricsPayload, NodeMetadata, OnboardingPayload, SyncPayload, SyncReportPayload,
-    SyncResponse, TelemetryAccountActivityPayload, TelemetryInfraPayload, TelemetryNodePayload,
-    TelemetrySnapshotPayload, DEFAULT_HEARTBEAT_PATH, DEFAULT_NODE_METRICS_PATH,
-    DEFAULT_REGISTER_PATH, DEFAULT_SYNC_PATH_TEMPLATE, DEFAULT_SYNC_REPORT_PATH,
-    DEFAULT_TELEMETRY_SNAPSHOTS_PATH,
+    Account, AccountExportPayload, HeartbeatPayload, HeartbeatStats, LkApiClient, NodeMetadata,
+    NodeMetricsPayload, OnboardingPayload, RouteActionAckPayload, RouteActionCommand, SyncPayload,
+    SyncReportPayload, SyncResponse, TelemetryAccountActivityPayload, TelemetryInfraPayload,
+    TelemetryNodePayload, TelemetrySnapshotPayload, DEFAULT_HEARTBEAT_PATH,
+    DEFAULT_NODE_METRICS_PATH, DEFAULT_REGISTER_PATH, DEFAULT_ROUTE_ACTION_ACK_PATH,
+    DEFAULT_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE, DEFAULT_SYNC_PATH_TEMPLATE,
+    DEFAULT_SYNC_REPORT_PATH, DEFAULT_TELEMETRY_SNAPSHOTS_PATH,
 };
 use link_config::LinkGenerationConfig;
 use lk_bulk_writer::{LkArtifactRecord, LkBulkWriter, LkWriteContract};
@@ -51,6 +52,9 @@ const REGISTER_MAX_BACKOFF: Duration = Duration::from_secs(60);
 const HEARTBEAT_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const HEARTBEAT_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const HEARTBEAT_MAX_ATTEMPTS: usize = 3;
+const ROUTE_ACTION_ACK_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
+const ROUTE_ACTION_ACK_MAX_BACKOFF: Duration = Duration::from_secs(300);
+const DEFAULT_ROUTE_ACTION_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_DB_WORKER_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_METRICS_PUSH_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_TELEMETRY_PUSH_INTERVAL: Duration = Duration::from_secs(60);
@@ -62,6 +66,9 @@ const DEFAULT_SPEEDTEST_HISTORY_LIMIT: usize = 24;
 const INVENTORY_INGEST_ATTEMPTS: usize = 3;
 const INVENTORY_INGEST_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const SYNC_REPORT_OUTBOX_FILE: &str = "pending_sync_reports.jsonl";
+const ROUTE_ACTION_STATE_FILE: &str = "route_action_state.json";
+const ROUTE_ACTION_ACK_OUTBOX_FILE: &str = "pending_route_action_acks.jsonl";
+const ROUTE_ACTION_DRAIN_MARKER_FILE: &str = "route_action_drain_marker.json";
 const RUNTIME_PRIMARY_MARKER_FILE: &str = ".runtime_credentials_primary";
 const DEFAULT_RUNTIME_VALIDATION_MIN_USERS: usize = 1;
 const DEFAULT_RUNTIME_VALIDATION_MAX_USERS: usize = 100;
@@ -528,9 +535,7 @@ impl Config {
             .transpose()?
             .unwrap_or(DEFAULT_SPEEDTEST_DOWNLOAD_MB);
         if !(1..=100).contains(&speedtest_download_mb) {
-            return Err(
-                "AGENT_SPEEDTEST_DOWNLOAD_MB must be in range 1..=100".to_string(),
-            );
+            return Err("AGENT_SPEEDTEST_DOWNLOAD_MB must be in range 1..=100".to_string());
         }
         let speedtest_upload_mb = optional_env_nonempty("AGENT_SPEEDTEST_UPLOAD_MB")
             .map(|raw| {
@@ -545,9 +550,9 @@ impl Config {
         }
         let speedtest_timeout = optional_env_nonempty("AGENT_SPEEDTEST_TIMEOUT_SEC")
             .map(|raw| {
-                let secs = raw.parse::<u64>().map_err(|e| {
-                    format!("AGENT_SPEEDTEST_TIMEOUT_SEC must be u64 seconds: {e}")
-                })?;
+                let secs = raw
+                    .parse::<u64>()
+                    .map_err(|e| format!("AGENT_SPEEDTEST_TIMEOUT_SEC must be u64 seconds: {e}"))?;
                 Ok::<Duration, String>(Duration::from_secs(secs))
             })
             .transpose()?
@@ -800,12 +805,93 @@ struct AgentState {
     credentials_sha256: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+struct RouteActionState {
+    schema_version: u8,
+    #[serde(default)]
+    commands: BTreeMap<String, StoredRouteActionCommand>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct StoredRouteActionCommand {
+    decision_id: String,
+    action: String,
+    lease_id: Option<String>,
+    last_status: String,
+    status_reason_code: Option<String>,
+    observed_at: String,
+    #[serde(default)]
+    ack_ids: Vec<String>,
+}
+
+struct RouteActionRuntime {
+    enabled: bool,
+    poll_interval: Duration,
+    state_path: PathBuf,
+    ack_outbox_path: PathBuf,
+    drain_marker_path: PathBuf,
+    drain_cmd: Option<String>,
+    state: RouteActionState,
+    ack_backoff: Duration,
+    ack_next_retry_at: Instant,
+}
+
+impl RouteActionRuntime {
+    async fn from_env(runtime_dir: &Path) -> Result<Self, String> {
+        let enabled = env_flag_enabled("TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED");
+        let poll_interval = optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_POLL_INTERVAL_SEC")
+            .map(|raw| {
+                let secs = raw.parse::<u64>().map_err(|e| {
+                    format!("TRUSTTUNNEL_ROUTE_ACTION_POLL_INTERVAL_SEC must be u64 seconds: {e}")
+                })?;
+                Ok::<Duration, String>(Duration::from_secs(secs))
+            })
+            .transpose()?
+            .unwrap_or(DEFAULT_ROUTE_ACTION_POLL_INTERVAL);
+        if enabled && poll_interval.is_zero() {
+            return Err(
+                "TRUSTTUNNEL_ROUTE_ACTION_POLL_INTERVAL_SEC must be greater than zero".to_string(),
+            );
+        }
+
+        let state_path = optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_STATE_FILE")
+            .map(PathBuf::from)
+            .map(|path| resolve_runtime_path(runtime_dir, &path))
+            .unwrap_or_else(|| runtime_dir.join(ROUTE_ACTION_STATE_FILE));
+        let ack_outbox_path = optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_ACK_OUTBOX_FILE")
+            .map(PathBuf::from)
+            .map(|path| resolve_runtime_path(runtime_dir, &path))
+            .unwrap_or_else(|| runtime_dir.join(ROUTE_ACTION_ACK_OUTBOX_FILE));
+        let drain_marker_path = optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_DRAIN_MARKER_FILE")
+            .map(PathBuf::from)
+            .map(|path| resolve_runtime_path(runtime_dir, &path))
+            .unwrap_or_else(|| runtime_dir.join(ROUTE_ACTION_DRAIN_MARKER_FILE));
+        let drain_cmd = optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD");
+        let state = load_route_action_state(&state_path)
+            .await
+            .unwrap_or_default();
+
+        Ok(Self {
+            enabled,
+            poll_interval,
+            state_path,
+            ack_outbox_path,
+            drain_marker_path,
+            drain_cmd,
+            state,
+            ack_backoff: ROUTE_ACTION_ACK_INITIAL_BACKOFF,
+            ack_next_retry_at: Instant::now(),
+        })
+    }
+}
+
 struct Agent {
     cfg: Config,
     workspace: RuntimeWorkspace,
     http_client: reqwest::Client,
     lk_api: LkApiClient,
     state: AgentState,
+    route_actions: RouteActionRuntime,
     node_metadata: NodeMetadata,
     last_apply_status: String,
     db_worker_health: DbWorkerHealthState,
@@ -1098,6 +1184,11 @@ impl Agent {
                 "failed to initialize lifecycle API client: empty lifecycle base URL".to_string(),
             );
         }
+        let route_action_commands_path_template =
+            optional_env_nonempty("LK_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE")
+                .unwrap_or_else(|| DEFAULT_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE.to_string());
+        let route_action_ack_path = optional_env_nonempty("LK_ROUTE_ACTION_ACK_PATH")
+            .unwrap_or_else(|| DEFAULT_ROUTE_ACTION_ACK_PATH.to_string());
         let lk_api = LkApiClient::new(
             client.clone(),
             lk_base_url,
@@ -1108,6 +1199,8 @@ impl Agent {
             cfg.sync_path_template.clone().unwrap_or_default(),
             cfg.lk_metrics_path.clone(),
             cfg.lk_telemetry_snapshots_path.clone(),
+            route_action_commands_path_template,
+            route_action_ack_path,
         );
 
         let metrics = Arc::new(AgentMetrics::new(&node_metadata.node_external_id)?);
@@ -1121,12 +1214,14 @@ impl Agent {
             cfg.trusttunnel_runtime_dir.clone(),
             cfg.debug_preserve_temp_files,
         );
+        let route_actions = RouteActionRuntime::from_env(&cfg.trusttunnel_runtime_dir).await?;
         Ok(Self {
             cfg,
             workspace,
             http_client: client,
             lk_api,
             state,
+            route_actions,
             node_metadata,
             last_apply_status: "pending".to_string(),
             db_worker_health: DbWorkerHealthState::default(),
@@ -1281,6 +1376,8 @@ impl Agent {
         telemetry_push_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut speedtest_tick = interval(self.cfg.speedtest_interval);
         speedtest_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut route_action_tick = interval(self.route_actions.poll_interval);
+        route_action_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut backoff = Duration::from_secs(1);
         let mut pending_plan: Option<sidecar_sync::ReconcilePlan> = None;
         loop {
@@ -1301,6 +1398,10 @@ impl Agent {
                 }
                 _ = speedtest_tick.tick(), if self.cfg.speedtest_enabled => {
                     self.start_speedtest_probe();
+                    continue;
+                }
+                _ = route_action_tick.tick(), if self.route_actions.enabled => {
+                    self.route_action_tick().await;
                     continue;
                 }
             };
@@ -2133,6 +2234,8 @@ impl Agent {
         speedtest_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut sync_report_tick = interval(Duration::from_secs(1));
         sync_report_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut route_action_tick = interval(self.route_actions.poll_interval);
+        route_action_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
 
         let mut backoff = Duration::from_secs(1);
 
@@ -2168,6 +2271,9 @@ impl Agent {
                 }
                 _ = sync_report_tick.tick() => {
                     self.flush_pending_sync_reports().await;
+                }
+                _ = route_action_tick.tick(), if self.route_actions.enabled => {
+                    self.route_action_tick().await;
                 }
             }
         }
@@ -2227,7 +2333,12 @@ impl Agent {
                 .await?;
             self.metrics
                 .reconcile_total
-                .with_label_values(&[&node, &snapshot.version, "skipped", "onboarding_state"])
+                .with_label_values(&[
+                    node.as_str(),
+                    snapshot.version.as_str(),
+                    "skipped",
+                    "onboarding_state",
+                ])
                 .inc();
             log_event(
                 "info",
@@ -2248,8 +2359,8 @@ impl Agent {
             self.metrics
                 .reconcile_total
                 .with_label_values(&[
-                    &node,
-                    &snapshot.version,
+                    node.as_str(),
+                    snapshot.version.as_str(),
                     "skipped",
                     "reconcile_not_required",
                 ])
@@ -2271,7 +2382,12 @@ impl Agent {
                 .await?;
             self.metrics
                 .reconcile_total
-                .with_label_values(&[&node, &snapshot.version, "failed", "invalid_checksum"])
+                .with_label_values(&[
+                    node.as_str(),
+                    snapshot.version.as_str(),
+                    "failed",
+                    "invalid_checksum",
+                ])
                 .inc();
             self.metrics
                 .last_failed_reconcile
@@ -2304,7 +2420,12 @@ impl Agent {
             );
             self.metrics
                 .reconcile_total
-                .with_label_values(&[&node, &snapshot.version, "unchanged", "none"])
+                .with_label_values(&[
+                    node.as_str(),
+                    snapshot.version.as_str(),
+                    "unchanged",
+                    "none",
+                ])
                 .inc();
             log_event(
                 "info",
@@ -2375,8 +2496,8 @@ impl Agent {
         self.metrics
             .apply_total
             .with_label_values(&[
-                &node,
-                &snapshot.version,
+                node.as_str(),
+                snapshot.version.as_str(),
                 if apply_ok { "success" } else { "failed" },
                 if apply_ok { "none" } else { "apply_or_verify" },
             ])
@@ -2396,7 +2517,7 @@ impl Agent {
         if !apply_ok {
             self.metrics
                 .reconcile_total
-                .with_label_values(&[&node, &snapshot.version, "failed", "apply"])
+                .with_label_values(&[node.as_str(), snapshot.version.as_str(), "failed", "apply"])
                 .inc();
             self.metrics
                 .last_failed_reconcile
@@ -2439,7 +2560,12 @@ impl Agent {
             };
             self.metrics
                 .tt_link_generation_total
-                .with_label_values(&[&node, &snapshot.version, "success", error_class])
+                .with_label_values(&[
+                    node.as_str(),
+                    snapshot.version.as_str(),
+                    "success",
+                    error_class,
+                ])
                 .inc();
             log_event(
                 "info",
@@ -2453,7 +2579,7 @@ impl Agent {
             .await?;
         self.metrics
             .reconcile_total
-            .with_label_values(&[&node, &snapshot.version, "success", "none"])
+            .with_label_values(&[node.as_str(), snapshot.version.as_str(), "success", "none"])
             .inc();
         self.metrics
             .last_successful_reconcile
@@ -2706,6 +2832,346 @@ impl Agent {
         self.sync_report_next_retry_at = Instant::now();
     }
 
+    async fn route_action_tick(&mut self) {
+        self.flush_pending_route_action_acks().await;
+        match self
+            .lk_api
+            .route_action_commands(&self.cfg.node_external_id)
+            .await
+        {
+            Ok(response) => {
+                for command in response.commands {
+                    if let Err(err) = self.handle_route_action_command(command).await {
+                        eprintln!("route action command handling failed: {err}");
+                    }
+                }
+                self.flush_pending_route_action_acks().await;
+            }
+            Err(err) => {
+                eprintln!("route action command poll failed: {err}");
+            }
+        }
+    }
+
+    async fn handle_route_action_command(
+        &mut self,
+        command: RouteActionCommand,
+    ) -> Result<(), String> {
+        if route_action_is_final(self.route_actions.state.commands.get(&command.command_id)) {
+            println!(
+                "route-action duplicate ignored: command_id={} action={}",
+                command.command_id, command.action
+            );
+            return Ok(());
+        }
+
+        if route_action_command_expired(&command) {
+            self.enqueue_route_action_ack(&command, "expired", Some("command_expired"), None)
+                .await?;
+            self.persist_route_action_command(&command, "expired", Some("command_expired"))
+                .await?;
+            return Ok(());
+        }
+
+        match command.action.as_str() {
+            "observe_noop" => {
+                self.enqueue_route_action_ack(&command, "received", None, None)
+                    .await?;
+                self.enqueue_route_action_ack(
+                    &command,
+                    "skipped",
+                    Some("observe_noop_no_runtime_mutation"),
+                    Some(serde_json::json!({
+                        "action": "observe_noop",
+                        "mutation": "none"
+                    })),
+                )
+                .await?;
+                self.persist_route_action_command(
+                    &command,
+                    "skipped",
+                    Some("observe_noop_no_runtime_mutation"),
+                )
+                .await?;
+            }
+            "apply_drain" => {
+                self.handle_apply_drain_route_action(&command).await?;
+            }
+            _ => {
+                self.enqueue_route_action_ack(
+                    &command,
+                    "skipped",
+                    Some("unsupported_command_action"),
+                    Some(serde_json::json!({
+                        "action": command.action,
+                        "supported_actions": ["observe_noop", "apply_drain"]
+                    })),
+                )
+                .await?;
+                self.persist_route_action_command(
+                    &command,
+                    "skipped",
+                    Some("unsupported_command_action"),
+                )
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn handle_apply_drain_route_action(
+        &mut self,
+        command: &RouteActionCommand,
+    ) -> Result<(), String> {
+        self.enqueue_route_action_ack(command, "received", None, None)
+            .await?;
+
+        if let Some(target_external_node_id) = command.target_external_node_id.as_deref() {
+            if target_external_node_id != self.cfg.node_external_id {
+                self.enqueue_route_action_ack(
+                    command,
+                    "skipped",
+                    Some("target_node_mismatch"),
+                    Some(serde_json::json!({
+                        "target_external_node_id": target_external_node_id,
+                        "runtime_id": self.cfg.node_external_id
+                    })),
+                )
+                .await?;
+                self.persist_route_action_command(command, "skipped", Some("target_node_mismatch"))
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        persist_route_action_drain_marker(
+            &self.route_actions.drain_marker_path,
+            &build_route_action_drain_marker(&self.cfg.node_external_id, command),
+        )
+        .await?;
+
+        if let Some(cmd) = &self.route_actions.drain_cmd {
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .env("ROUTE_ACTION_COMMAND_ID", &command.command_id)
+                .env("ROUTE_ACTION_DECISION_ID", &command.decision_id)
+                .env(
+                    "ROUTE_ACTION_LEASE_ID",
+                    command.lease_id.as_deref().unwrap_or(""),
+                )
+                .env("ROUTE_ACTION_RUNTIME_ID", &self.cfg.node_external_id)
+                .env(
+                    "ROUTE_ACTION_REASON_CODE",
+                    command.reason_code.as_deref().unwrap_or(""),
+                )
+                .env(
+                    "ROUTE_ACTION_TARGET_ENTRYPOINT_ID",
+                    command.target_entrypoint_id.as_deref().unwrap_or(""),
+                )
+                .env(
+                    "ROUTE_ACTION_TARGET_CONTOUR_ID",
+                    command.target_contour_id.as_deref().unwrap_or(""),
+                )
+                .status()
+                .await
+                .map_err(|e| {
+                    format!("failed to execute TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD: {e}")
+                })?;
+
+            if !status.success() {
+                self.enqueue_route_action_ack(
+                    command,
+                    "failed",
+                    Some("drain_hook_failed"),
+                    Some(serde_json::json!({
+                        "drain_marker_path": self.route_actions.drain_marker_path,
+                        "exit_status": status.to_string()
+                    })),
+                )
+                .await?;
+                self.persist_route_action_command(command, "failed", Some("drain_hook_failed"))
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        self.enqueue_route_action_ack(
+            command,
+            "applied",
+            Some("apply_drain_marker_written"),
+            Some(serde_json::json!({
+                "drain_marker_path": self.route_actions.drain_marker_path,
+                "drain_hook_configured": self.route_actions.drain_cmd.is_some()
+            })),
+        )
+        .await?;
+        self.persist_route_action_command(command, "applied", Some("apply_drain_marker_written"))
+            .await
+    }
+
+    async fn enqueue_route_action_ack(
+        &mut self,
+        command: &RouteActionCommand,
+        status: &'static str,
+        status_reason_code: Option<&'static str>,
+        evidence: Option<serde_json::Value>,
+    ) -> Result<(), String> {
+        let ack = build_route_action_ack(
+            &self.cfg.node_external_id,
+            &self.cfg.runtime_version,
+            command,
+            status,
+            status_reason_code,
+            evidence,
+        );
+        if self
+            .route_actions
+            .state
+            .commands
+            .get(&command.command_id)
+            .is_some_and(|stored| stored.ack_ids.iter().any(|ack_id| ack_id == &ack.ack_id))
+        {
+            return Ok(());
+        }
+
+        append_pending_route_action_ack(&self.route_actions.ack_outbox_path, &ack).await?;
+        self.route_actions
+            .state
+            .commands
+            .entry(command.command_id.clone())
+            .or_insert_with(|| StoredRouteActionCommand {
+                decision_id: command.decision_id.clone(),
+                action: command.action.clone(),
+                lease_id: command.lease_id.clone(),
+                last_status: status.to_string(),
+                status_reason_code: status_reason_code.map(ToString::to_string),
+                observed_at: ack.occurred_at.clone(),
+                ack_ids: vec![],
+            })
+            .ack_ids
+            .push(ack.ack_id.clone());
+        persist_route_action_state(&self.route_actions.state_path, &self.route_actions.state)
+            .await?;
+        Ok(())
+    }
+
+    async fn persist_route_action_command(
+        &mut self,
+        command: &RouteActionCommand,
+        status: &str,
+        status_reason_code: Option<&str>,
+    ) -> Result<(), String> {
+        let observed_at = chrono::Utc::now().to_rfc3339();
+        let entry = self
+            .route_actions
+            .state
+            .commands
+            .entry(command.command_id.clone())
+            .or_insert_with(|| StoredRouteActionCommand {
+                decision_id: command.decision_id.clone(),
+                action: command.action.clone(),
+                lease_id: command.lease_id.clone(),
+                last_status: status.to_string(),
+                status_reason_code: status_reason_code.map(ToString::to_string),
+                observed_at: observed_at.clone(),
+                ack_ids: vec![],
+            });
+        entry.decision_id = command.decision_id.clone();
+        entry.action = command.action.clone();
+        entry.lease_id = command.lease_id.clone();
+        entry.last_status = status.to_string();
+        entry.status_reason_code = status_reason_code.map(ToString::to_string);
+        entry.observed_at = observed_at;
+        persist_route_action_state(&self.route_actions.state_path, &self.route_actions.state).await
+    }
+
+    async fn flush_pending_route_action_acks(&mut self) {
+        if Instant::now() < self.route_actions.ack_next_retry_at {
+            return;
+        }
+        let pending =
+            match load_pending_route_action_acks(&self.route_actions.ack_outbox_path).await {
+                Ok(items) => items,
+                Err(err) => {
+                    eprintln!("failed to load route action ACK outbox: {err}");
+                    self.increase_route_action_ack_backoff();
+                    return;
+                }
+            };
+        if pending.is_empty() {
+            self.reset_route_action_ack_backoff();
+            return;
+        }
+
+        for (idx, item) in pending.iter().enumerate() {
+            if let Err(err) = self.send_route_action_ack_payload(item).await {
+                eprintln!("route action ACK retry failed: {err}");
+                if let Err(persist_err) = persist_pending_route_action_acks(
+                    &self.route_actions.ack_outbox_path,
+                    &pending[idx..],
+                )
+                .await
+                {
+                    eprintln!("failed to persist route action ACK outbox: {persist_err}");
+                }
+                self.increase_route_action_ack_backoff();
+                return;
+            }
+        }
+
+        if let Err(err) =
+            persist_pending_route_action_acks(&self.route_actions.ack_outbox_path, &[]).await
+        {
+            eprintln!("failed to clear route action ACK outbox: {err}");
+            self.increase_route_action_ack_backoff();
+            return;
+        }
+        self.reset_route_action_ack_backoff();
+    }
+
+    async fn send_route_action_ack_payload(
+        &self,
+        ack: &PendingRouteActionAck,
+    ) -> Result<(), String> {
+        let payload = RouteActionAckPayload {
+            contract_version: "route_action_ack.v1",
+            ack_id: &ack.ack_id,
+            command_id: &ack.command_id,
+            decision_id: &ack.decision_id,
+            lease_id: ack.lease_id.as_deref(),
+            runtime_id: &ack.runtime_id,
+            runtime_revision: &ack.runtime_revision,
+            observed_policy_version: ack.observed_policy_version,
+            status: &ack.status,
+            status_reason_code: ack.status_reason_code.as_deref(),
+            evidence: ack.evidence.as_ref(),
+            occurred_at: &ack.occurred_at,
+        };
+        self.lk_api.push_route_action_ack(&payload).await?;
+        println!(
+            "route-action ACK sent: command_id={} ack_id={} status={} reason={}",
+            ack.command_id,
+            ack.ack_id,
+            ack.status,
+            ack.status_reason_code.as_deref().unwrap_or("<none>")
+        );
+        Ok(())
+    }
+
+    fn increase_route_action_ack_backoff(&mut self) {
+        self.route_actions.ack_next_retry_at = Instant::now() + self.route_actions.ack_backoff;
+        self.route_actions.ack_backoff = std::cmp::min(
+            self.route_actions.ack_backoff.saturating_mul(2),
+            ROUTE_ACTION_ACK_MAX_BACKOFF,
+        );
+    }
+
+    fn reset_route_action_ack_backoff(&mut self) {
+        self.route_actions.ack_backoff = ROUTE_ACTION_ACK_INITIAL_BACKOFF;
+        self.route_actions.ack_next_retry_at = Instant::now();
+    }
+
     async fn send_heartbeat_with_retry(&self) {
         let mut backoff = HEARTBEAT_INITIAL_BACKOFF;
         for attempt in 1..=HEARTBEAT_MAX_ATTEMPTS {
@@ -2795,7 +3261,7 @@ impl Agent {
             if let Some(metric) = &self.metrics.runtime_health_total {
                 metric
                     .with_label_values(&[
-                        &self.cfg.node_external_id,
+                        self.cfg.node_external_id.as_str(),
                         self.state.applied_revision.as_deref().unwrap_or("none"),
                         "failed",
                         err.kind(),
@@ -2816,7 +3282,7 @@ impl Agent {
         if let Some(metric) = &self.metrics.runtime_health_total {
             metric
                 .with_label_values(&[
-                    &self.cfg.node_external_id,
+                    self.cfg.node_external_id.as_str(),
                     self.state.applied_revision.as_deref().unwrap_or("none"),
                     "success",
                     "none",
@@ -2840,7 +3306,9 @@ impl Agent {
 
     fn collect_runtime_status(&self) -> RuntimeStatus {
         match self.cfg.runtime_mode {
-            RuntimeMode::DbWorker => RuntimeStatus::collect_db_worker(&self.cfg.runtime_credentials_path),
+            RuntimeMode::DbWorker => {
+                RuntimeStatus::collect_db_worker(&self.cfg.runtime_credentials_path)
+            }
             RuntimeMode::LegacyHttp => RuntimeStatus::collect(
                 self.cfg
                     .runtime_pid_path
@@ -3102,8 +3570,9 @@ impl Agent {
                     .as_secs_f64();
                 if elapsed > 0.0 {
                     let bytes_delta = total_bytes.saturating_sub(previous.total_bytes) as f64;
-                    let bandwidth_mbps =
-                        ((bytes_delta * 8.0) / elapsed / 1_000_000.0).round().max(0.0) as u64;
+                    let bandwidth_mbps = ((bytes_delta * 8.0) / elapsed / 1_000_000.0)
+                        .round()
+                        .max(0.0) as u64;
                     let active_delta =
                         active_connections.saturating_sub(previous.active_connections) as f64;
                     let establish_rate = (active_delta / elapsed).round().max(0.0) as u64;
@@ -3152,7 +3621,9 @@ impl Agent {
             error_rate,
             endpoint_metrics_available: endpoint_metrics.is_some(),
             endpoint_metrics_url,
-            endpoint_inbound_bytes: endpoint_metrics.as_ref().and_then(|item| item.inbound_bytes),
+            endpoint_inbound_bytes: endpoint_metrics
+                .as_ref()
+                .and_then(|item| item.inbound_bytes),
             endpoint_outbound_bytes: endpoint_metrics
                 .as_ref()
                 .and_then(|item| item.outbound_bytes),
@@ -4140,6 +4611,37 @@ struct PendingSyncReportOwned {
     account_exports: Vec<AccountExportOwned>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct PendingRouteActionAck {
+    ack_id: String,
+    command_id: String,
+    decision_id: String,
+    lease_id: Option<String>,
+    runtime_id: String,
+    runtime_revision: String,
+    observed_policy_version: Option<i64>,
+    status: String,
+    status_reason_code: Option<String>,
+    evidence: Option<serde_json::Value>,
+    occurred_at: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct RouteActionDrainMarker {
+    schema_version: u8,
+    runtime_id: String,
+    command_id: String,
+    decision_id: String,
+    lease_id: Option<String>,
+    reason_code: Option<String>,
+    target_contour_id: Option<String>,
+    target_entrypoint: Option<String>,
+    target_entrypoint_id: Option<String>,
+    expected_policy_version: Option<i64>,
+    params: serde_json::Value,
+    applied_at: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct AccountExportOwned {
     username: String,
@@ -4340,27 +4842,30 @@ async fn run_speedtest_probe(
         endpoint_config_path,
     )
     .await?;
-    let client = build_speedtest_client(&target, timeout).map_err(|message| SpeedtestProbeFailure {
-        enabled: true,
-        target_url: Some(target.display_url.clone()),
-        message,
-    })?;
+    let client =
+        build_speedtest_client(&target, timeout).map_err(|message| SpeedtestProbeFailure {
+            enabled: true,
+            target_url: Some(target.display_url.clone()),
+            message,
+        })?;
     let download_url = format!("{}/{}mb.bin", target.base_url, download_mb);
     let upload_url = format!("{}/upload.html", target.base_url);
-    let (download_duration_ms, downloaded_bytes) = execute_speedtest_download(&client, &download_url)
-        .await
-        .map_err(|message| SpeedtestProbeFailure {
-            enabled: true,
-            target_url: Some(target.display_url.clone()),
-            message,
-        })?;
-    let (upload_duration_ms, uploaded_bytes) = execute_speedtest_upload(&client, &upload_url, upload_mb)
-        .await
-        .map_err(|message| SpeedtestProbeFailure {
-            enabled: true,
-            target_url: Some(target.display_url.clone()),
-            message,
-        })?;
+    let (download_duration_ms, downloaded_bytes) =
+        execute_speedtest_download(&client, &download_url)
+            .await
+            .map_err(|message| SpeedtestProbeFailure {
+                enabled: true,
+                target_url: Some(target.display_url.clone()),
+                message,
+            })?;
+    let (upload_duration_ms, uploaded_bytes) =
+        execute_speedtest_upload(&client, &upload_url, upload_mb)
+            .await
+            .map_err(|message| SpeedtestProbeFailure {
+                enabled: true,
+                target_url: Some(target.display_url.clone()),
+                message,
+            })?;
 
     Ok(SpeedtestProbeSample {
         collected_at: chrono::Utc::now(),
@@ -4394,20 +4899,20 @@ async fn derive_speedtest_target(
         });
     }
 
-    let speedtest_path =
-        load_speedtest_path_from_config(endpoint_config_path)
-            .await
-            .map_err(|message| SpeedtestProbeFailure {
-                enabled: false,
-                target_url: None,
-                message,
-            })?;
-    let link_cfg = LinkGenerationConfig::load_from_file_or_legacy_env(link_config_path, node_external_id)
+    let speedtest_path = load_speedtest_path_from_config(endpoint_config_path)
+        .await
         .map_err(|message| SpeedtestProbeFailure {
-            enabled: true,
+            enabled: false,
             target_url: None,
             message,
         })?;
+    let link_cfg =
+        LinkGenerationConfig::load_from_file_or_legacy_env(link_config_path, node_external_id)
+            .map_err(|message| SpeedtestProbeFailure {
+                enabled: true,
+                target_url: None,
+                message,
+            })?;
     let address_host = link_cfg.address_host();
     let request_host = link_cfg
         .custom_sni()
@@ -4436,9 +4941,13 @@ async fn derive_speedtest_target(
     })
 }
 
-fn build_speedtest_client(target: &SpeedtestTarget, timeout: Duration) -> Result<reqwest::Client, String> {
+fn build_speedtest_client(
+    target: &SpeedtestTarget,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
-    if let (Some(request_host), Some(resolved_addr)) = (&target.request_host, target.resolved_addr) {
+    if let (Some(request_host), Some(resolved_addr)) = (&target.request_host, target.resolved_addr)
+    {
         builder = builder.resolve(request_host, resolved_addr);
     }
     builder
@@ -4502,9 +5011,12 @@ async fn load_speedtest_path_from_config(config_path: &Path) -> Result<String, S
             config_path.display()
         )
     })?;
-    let doc = raw
-        .parse::<toml_edit::Document>()
-        .map_err(|e| format!("failed to parse endpoint config {}: {e}", config_path.display()))?;
+    let doc = raw.parse::<toml_edit::Document>().map_err(|e| {
+        format!(
+            "failed to parse endpoint config {}: {e}",
+            config_path.display()
+        )
+    })?;
     let enabled = doc
         .get("speedtest_enable")
         .and_then(|item| item.as_bool())
@@ -4548,7 +5060,9 @@ fn format_https_base_url(host: &str, port: u16, path: &str) -> String {
 }
 
 fn normalize_host(host: &str) -> String {
-    host.trim().trim_matches(&['[', ']'][..]).to_ascii_lowercase()
+    host.trim()
+        .trim_matches(&['[', ']'][..])
+        .to_ascii_lowercase()
 }
 
 fn normalize_base_url(raw: &str) -> Option<String> {
@@ -4670,7 +5184,11 @@ fn parse_endpoint_account_activity_metrics(body: &str) -> Vec<EndpointAccountAct
         ) {
             continue;
         }
-        let Some(username) = sample.labels.get("username").filter(|value| !value.is_empty()) else {
+        let Some(username) = sample
+            .labels
+            .get("username")
+            .filter(|value| !value.is_empty())
+        else {
             continue;
         };
         let protocol = sample
@@ -4686,12 +5204,14 @@ fn parse_endpoint_account_activity_metrics(body: &str) -> Vec<EndpointAccountAct
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
         let key = (username.clone(), protocol.clone(), client_ip.clone());
-        let item = by_key.entry(key).or_insert_with(|| EndpointAccountActivity {
-            username: username.clone(),
-            protocol,
-            client_ip,
-            ..Default::default()
-        });
+        let item = by_key
+            .entry(key)
+            .or_insert_with(|| EndpointAccountActivity {
+                username: username.clone(),
+                protocol,
+                client_ip,
+                ..Default::default()
+            });
         let value = sample.value.round().max(0.0) as u64;
         match sample.name.as_str() {
             "account_client_sessions" => item.active_connections = value,
@@ -4835,17 +5355,18 @@ fn sum_counter_family_by_label(
 ) -> u64 {
     families
         .iter()
-        .find(|family| family.get_name() == family_name)
+        .find(|family| family.name() == family_name)
         .map(|family| {
             family
                 .get_metric()
                 .iter()
                 .filter(|metric| {
-                    metric.get_label().iter().any(|label| {
-                        label.get_name() == label_name && label.get_value() == expected_value
-                    })
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == label_name && label.value() == expected_value)
                 })
-                .map(|metric| metric.get_counter().get_value().round().max(0.0) as u64)
+                .map(|metric| metric.get_counter().value().round().max(0.0) as u64)
                 .sum()
         })
         .unwrap_or(0)
@@ -4854,12 +5375,12 @@ fn sum_counter_family_by_label(
 fn sum_gauge_family(families: &[prometheus::proto::MetricFamily], family_name: &str) -> i64 {
     families
         .iter()
-        .find(|family| family.get_name() == family_name)
+        .find(|family| family.name() == family_name)
         .map(|family| {
             family
                 .get_metric()
                 .iter()
-                .map(|metric| metric.get_gauge().get_value().round() as i64)
+                .map(|metric| metric.get_gauge().value().round() as i64)
                 .sum()
         })
         .unwrap_or(0)
@@ -5221,6 +5742,203 @@ async fn persist_pending_sync_reports(
     atomic_write(path, &encoded).await
 }
 
+async fn load_route_action_state(path: &Path) -> Option<RouteActionState> {
+    let bytes = fs::read(path).await.ok()?;
+    serde_json::from_slice::<RouteActionState>(&bytes).ok()
+}
+
+fn build_route_action_drain_marker(
+    runtime_id: &str,
+    command: &RouteActionCommand,
+) -> RouteActionDrainMarker {
+    RouteActionDrainMarker {
+        schema_version: 1,
+        runtime_id: runtime_id.to_string(),
+        command_id: command.command_id.clone(),
+        decision_id: command.decision_id.clone(),
+        lease_id: command.lease_id.clone(),
+        reason_code: command.reason_code.clone(),
+        target_contour_id: command.target_contour_id.clone(),
+        target_entrypoint: command.target_entrypoint.clone(),
+        target_entrypoint_id: command.target_entrypoint_id.clone(),
+        expected_policy_version: command.expected_policy_version,
+        params: command.params.clone(),
+        applied_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+async fn persist_route_action_drain_marker(
+    path: &Path,
+    marker: &RouteActionDrainMarker,
+) -> Result<(), String> {
+    let encoded = serde_json::to_vec_pretty(marker)
+        .map_err(|e| format!("failed to serialize route action drain marker JSON: {e}"))?;
+    atomic_write(path, &encoded).await
+}
+
+async fn persist_route_action_state(path: &Path, state: &RouteActionState) -> Result<(), String> {
+    let mut state = state.clone();
+    state.schema_version = 1;
+    let encoded = serde_json::to_vec_pretty(&state)
+        .map_err(|e| format!("failed to serialize route action state JSON: {e}"))?;
+    atomic_write(path, &encoded).await
+}
+
+async fn append_pending_route_action_ack(
+    outbox_path: &Path,
+    ack: &PendingRouteActionAck,
+) -> Result<(), String> {
+    let parent = outbox_path
+        .parent()
+        .ok_or_else(|| format!("path has no parent: {}", outbox_path.display()))?;
+    fs::create_dir_all(parent)
+        .await
+        .map_err(|e| format!("failed to create directory {}: {e}", parent.display()))?;
+
+    let mut outbox = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(outbox_path)
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to open route action ACK outbox {}: {e}",
+                outbox_path.display()
+            )
+        })?;
+    let encoded = serde_json::to_vec(ack)
+        .map_err(|e| format!("failed to serialize route action ACK outbox row: {e}"))?;
+    outbox
+        .write_all(&encoded)
+        .await
+        .map_err(|e| format!("failed to append route action ACK outbox row: {e}"))?;
+    outbox
+        .write_all(b"\n")
+        .await
+        .map_err(|e| format!("failed to append route action ACK outbox newline: {e}"))?;
+    outbox
+        .flush()
+        .await
+        .map_err(|e| format!("failed to flush route action ACK outbox: {e}"))?;
+    Ok(())
+}
+
+async fn load_pending_route_action_acks(path: &Path) -> Result<Vec<PendingRouteActionAck>, String> {
+    let raw = match fs::read(path).await {
+        Ok(bytes) => bytes,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(err) => {
+            return Err(format!(
+                "failed to read route action ACK outbox {}: {err}",
+                path.display()
+            ));
+        }
+    };
+    let content = std::str::from_utf8(&raw).map_err(|e| {
+        format!(
+            "route action ACK outbox is not valid UTF-8 {}: {e}",
+            path.display()
+        )
+    })?;
+
+    let mut acks = Vec::new();
+    for (idx, line) in content.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ack = serde_json::from_str::<PendingRouteActionAck>(line).map_err(|e| {
+            format!(
+                "failed to parse route action ACK outbox line {} in {}: {e}",
+                idx + 1,
+                path.display()
+            )
+        })?;
+        acks.push(ack);
+    }
+    Ok(acks)
+}
+
+async fn persist_pending_route_action_acks(
+    path: &Path,
+    acks: &[PendingRouteActionAck],
+) -> Result<(), String> {
+    if acks.is_empty() {
+        match fs::remove_file(path).await {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(format!(
+                    "failed to remove empty route action ACK outbox {}: {err}",
+                    path.display()
+                ));
+            }
+        }
+    }
+
+    let mut encoded = Vec::new();
+    for ack in acks {
+        let line = serde_json::to_vec(ack)
+            .map_err(|e| format!("failed to serialize route action ACK outbox row: {e}"))?;
+        encoded.extend_from_slice(&line);
+        encoded.push(b'\n');
+    }
+    atomic_write(path, &encoded).await
+}
+
+fn build_route_action_ack(
+    runtime_id: &str,
+    runtime_revision: &str,
+    command: &RouteActionCommand,
+    status: &str,
+    status_reason_code: Option<&str>,
+    evidence: Option<serde_json::Value>,
+) -> PendingRouteActionAck {
+    let occurred_at = chrono::Utc::now().to_rfc3339();
+    let id_input = format!(
+        "{}\n{}\n{}\n{}\n{}",
+        command.command_id,
+        command.lease_id.as_deref().unwrap_or(""),
+        runtime_id,
+        status,
+        status_reason_code.unwrap_or("")
+    );
+    PendingRouteActionAck {
+        ack_id: format!("tt-ra-ack-{}", &sha256_hex(id_input.as_bytes())[..20]),
+        command_id: command.command_id.clone(),
+        decision_id: command.decision_id.clone(),
+        lease_id: command.lease_id.clone(),
+        runtime_id: runtime_id.to_string(),
+        runtime_revision: runtime_revision.to_string(),
+        observed_policy_version: command.expected_policy_version,
+        status: status.to_string(),
+        status_reason_code: status_reason_code.map(ToString::to_string),
+        evidence,
+        occurred_at,
+    }
+}
+
+fn route_action_is_final(command: Option<&StoredRouteActionCommand>) -> bool {
+    command.is_some_and(|stored| {
+        matches!(
+            stored.last_status.as_str(),
+            "applied" | "skipped" | "failed" | "expired" | "rolled_back" | "recovery_observed"
+        )
+    })
+}
+
+fn route_action_command_expired(command: &RouteActionCommand) -> bool {
+    let Some(expires_at) = command
+        .lease_expires_at
+        .as_deref()
+        .or(command.expires_at.as_deref())
+    else {
+        return false;
+    };
+    chrono::DateTime::parse_from_rfc3339(expires_at)
+        .map(|expires_at| expires_at.with_timezone(&chrono::Utc) <= chrono::Utc::now())
+        .unwrap_or(false)
+}
+
 fn needs_tt_link_regeneration(account: &Account, current_config_hash: &str) -> bool {
     account.tt_link.trim().is_empty()
         || account.tt_link_config_hash != current_config_hash
@@ -5477,6 +6195,7 @@ fn count_active_clients(credentials_file: &Path) -> Option<u64> {
 #[cfg(test)]
 mod runtime_status_tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn runtime_health_status_dead_when_process_unavailable() {
@@ -5620,9 +6339,18 @@ client_sessions{protocol_type="http2"} 3
 inbound_traffic_bytes{protocol_type="http2"} 128
 "#;
 
-        assert_eq!(parse_prometheus_sum_metric(body, "client_sessions"), Some(5));
-        assert_eq!(parse_prometheus_sum_metric(body, "inbound_traffic_bytes"), Some(128));
-        assert_eq!(parse_prometheus_sum_metric(body, "outbound_traffic_bytes"), None);
+        assert_eq!(
+            parse_prometheus_sum_metric(body, "client_sessions"),
+            Some(5)
+        );
+        assert_eq!(
+            parse_prometheus_sum_metric(body, "inbound_traffic_bytes"),
+            Some(128)
+        );
+        assert_eq!(
+            parse_prometheus_sum_metric(body, "outbound_traffic_bytes"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -6225,6 +6953,46 @@ mod tests {
     }
 
     #[cfg(feature = "legacy-lk-http")]
+    fn route_action_command(
+        command_id: &str,
+        action: &str,
+        expires_at: Option<&str>,
+    ) -> RouteActionCommand {
+        RouteActionCommand {
+            contract_version: "route_action_command.v1".to_string(),
+            command_id: command_id.to_string(),
+            decision_id: format!("decision-{command_id}"),
+            action: action.to_string(),
+            scope: Some("entrypoint".to_string()),
+            lease_id: Some(format!("lease-{command_id}")),
+            lease_owner: Some("lk-executor".to_string()),
+            lease_expires_at: None,
+            expires_at: expires_at.map(ToString::to_string),
+            expected_runtime_revision: None,
+            expected_policy_version: Some(42),
+            reason_code: Some("route_degradation".to_string()),
+            target_contour_id: Some("rf".to_string()),
+            target_entrypoint: Some("SecureSoft RF Gate 01".to_string()),
+            target_entrypoint_id: Some("rf-gate-01".to_string()),
+            target_external_node_id: Some("node-1".to_string()),
+            params: serde_json::json!({}),
+        }
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    fn route_action_commands_json(
+        command_id: &str,
+        action: &str,
+        expires_at: Option<&str>,
+    ) -> String {
+        serde_json::json!({
+            "contract_version": "route_action_command.v1",
+            "commands": [route_action_command(command_id, action, expires_at)]
+        })
+        .to_string()
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
     async fn make_agent(temp_dir: &TempDir, base_url: &str, apply_cmd: Option<&str>) -> Agent {
         let runtime_dir = temp_dir.path().join("runtime");
         fs::create_dir_all(&runtime_dir).await.unwrap();
@@ -6804,7 +7572,7 @@ upload_buffer_size = 32768
         let runtime_dir = temp_dir.path();
         std::fs::write(
             runtime_dir.join("tt-link.toml"),
-            "node_external_id = \"node-1\"\nserver_address = \"89.110.100.165:443\"\ncert_domain = \"cdn.securesoft.dev\"\nprotocol = \"http2\"\ndns_servers = []\n",
+            "node_external_id = \"node-1\"\nserver_address = \"89.110.100.165:443\"\ncert_domain = \"cdn.securesoft.dev\"\ncustom_sni = \"cdn.securesoft.dev\"\nprotocol = \"http2\"\ndns_servers = []\n",
         )
         .unwrap();
 
@@ -7215,6 +7983,277 @@ upload_buffer_size = 32768
         assert!(!fs::try_exists(&path).await.unwrap());
     }
 
+    #[tokio::test]
+    async fn route_action_ack_outbox_roundtrip_is_separate_from_sync_reports() {
+        let tmp_dir = TempDir::new().unwrap();
+        let route_action_path = tmp_dir.path().join("pending_route_action_acks.jsonl");
+        let sync_report_path = tmp_dir.path().join("pending_sync_reports.jsonl");
+        let ack = PendingRouteActionAck {
+            ack_id: "ack-1".to_string(),
+            command_id: "cmd-1".to_string(),
+            decision_id: "decision-1".to_string(),
+            lease_id: Some("lease-1".to_string()),
+            runtime_id: "node-1".to_string(),
+            runtime_revision: "runtime-1".to_string(),
+            observed_policy_version: Some(7),
+            status: "received".to_string(),
+            status_reason_code: None,
+            evidence: None,
+            occurred_at: "2026-08-11T10:17:10Z".to_string(),
+        };
+
+        append_pending_route_action_ack(&route_action_path, &ack)
+            .await
+            .unwrap();
+
+        let loaded = load_pending_route_action_acks(&route_action_path)
+            .await
+            .unwrap();
+        assert_eq!(loaded, vec![ack]);
+        assert!(!fs::try_exists(&sync_report_path).await.unwrap());
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    #[tokio::test]
+    async fn route_action_tick_receives_observe_noop_and_flushes_acks() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+        let command_body = route_action_commands_json("cmd-noop-1", "observe_noop", None);
+        server
+            .enqueue(
+                Method::GET,
+                "/internal/trusttunnel/v1/nodes/node-1/route-actions/commands",
+                HyperStatusCode::OK,
+                command_body,
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+
+        agent.route_action_tick().await;
+
+        let stored = agent
+            .route_actions
+            .state
+            .commands
+            .get("cmd-noop-1")
+            .unwrap();
+        assert_eq!(stored.last_status, "skipped");
+        assert_eq!(
+            stored.status_reason_code.as_deref(),
+            Some("observe_noop_no_runtime_mutation")
+        );
+        assert!(!fs::try_exists(&agent.route_actions.ack_outbox_path)
+            .await
+            .unwrap());
+        let requests = server.captured().await;
+        let ack_bodies = requests
+            .iter()
+            .filter(|request| {
+                request.method == Method::POST
+                    && request.path == "/internal/trusttunnel/v1/nodes/route-actions/acks"
+            })
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ack_bodies.len(), 2);
+        assert_eq!(ack_bodies[0]["contract_version"], "route_action_ack.v1");
+        assert_eq!(ack_bodies[0]["status"], "received");
+        assert_eq!(ack_bodies[1]["status"], "skipped");
+        assert_eq!(
+            ack_bodies[1]["status_reason_code"],
+            "observe_noop_no_runtime_mutation"
+        );
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    #[tokio::test]
+    async fn route_action_apply_drain_writes_marker_and_flushes_applied_ack() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+        let command_body = route_action_commands_json("cmd-drain-1", "apply_drain", None);
+        server
+            .enqueue(
+                Method::GET,
+                "/internal/trusttunnel/v1/nodes/node-1/route-actions/commands",
+                HyperStatusCode::OK,
+                command_body,
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+
+        agent.route_action_tick().await;
+
+        let stored = agent
+            .route_actions
+            .state
+            .commands
+            .get("cmd-drain-1")
+            .unwrap();
+        assert_eq!(stored.last_status, "applied");
+        assert_eq!(
+            stored.status_reason_code.as_deref(),
+            Some("apply_drain_marker_written")
+        );
+
+        let marker_bytes = fs::read(&agent.route_actions.drain_marker_path)
+            .await
+            .unwrap();
+        let marker = serde_json::from_slice::<RouteActionDrainMarker>(&marker_bytes).unwrap();
+        assert_eq!(marker.command_id, "cmd-drain-1");
+        assert_eq!(marker.runtime_id, "node-1");
+        assert_eq!(marker.expected_policy_version, Some(42));
+
+        let requests = server.captured().await;
+        let ack_bodies = requests
+            .iter()
+            .filter(|request| {
+                request.method == Method::POST
+                    && request.path == "/internal/trusttunnel/v1/nodes/route-actions/acks"
+            })
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ack_bodies.len(), 2);
+        assert_eq!(ack_bodies[0]["status"], "received");
+        assert_eq!(ack_bodies[1]["status"], "applied");
+        assert_eq!(
+            ack_bodies[1]["status_reason_code"],
+            "apply_drain_marker_written"
+        );
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    #[tokio::test]
+    async fn route_action_ack_outbox_survives_restart_and_flushes_after_network_failure() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+        let command = route_action_command("cmd-retry-1", "observe_noop", None);
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::SERVICE_UNAVAILABLE,
+                "",
+            )
+            .await;
+
+        agent.handle_route_action_command(command).await.unwrap();
+        agent.flush_pending_route_action_acks().await;
+        assert!(fs::try_exists(&agent.route_actions.ack_outbox_path)
+            .await
+            .unwrap());
+
+        let mut restarted = make_agent(&tmp_dir, &server.base_url, None).await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+
+        restarted.flush_pending_route_action_acks().await;
+
+        assert!(!fs::try_exists(&restarted.route_actions.ack_outbox_path)
+            .await
+            .unwrap());
+        assert_eq!(
+            restarted
+                .route_actions
+                .state
+                .commands
+                .get("cmd-retry-1")
+                .unwrap()
+                .last_status,
+            "skipped"
+        );
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    #[tokio::test]
+    async fn route_action_refuses_unknown_and_expired_commands_safely() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+
+        agent
+            .handle_route_action_command(route_action_command(
+                "cmd-unknown-1",
+                "apply_quarantine",
+                None,
+            ))
+            .await
+            .unwrap();
+        agent
+            .handle_route_action_command(route_action_command(
+                "cmd-expired-1",
+                "observe_noop",
+                Some("2026-08-10T10:15:00Z"),
+            ))
+            .await
+            .unwrap();
+
+        let acks = load_pending_route_action_acks(&agent.route_actions.ack_outbox_path)
+            .await
+            .unwrap();
+        let statuses = acks
+            .iter()
+            .map(|ack| {
+                (
+                    ack.command_id.as_str(),
+                    ack.status.as_str(),
+                    ack.status_reason_code.as_deref(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(statuses.contains(&(
+            "cmd-unknown-1",
+            "skipped",
+            Some("unsupported_command_action")
+        )));
+        assert!(statuses.contains(&("cmd-expired-1", "expired", Some("command_expired"))));
+    }
+
     #[test]
     fn agent_metrics_registry_contains_required_metric_families() {
         let metrics = AgentMetrics::new("node-1").unwrap();
@@ -7222,7 +8261,7 @@ upload_buffer_size = 32768
             .registry
             .gather()
             .iter()
-            .map(|family| family.get_name().to_string())
+            .map(|family| family.name().to_string())
             .collect::<Vec<_>>();
 
         assert!(!names.is_empty());
@@ -7905,8 +8944,14 @@ upload_buffer_size = 32768
             .unwrap();
 
         assert!(!fs::try_exists(&state_path).await.unwrap());
-        assert_eq!(agent.db_worker_health.inventory_status, DbWorkerSignalStatus::Ok);
-        assert_eq!(agent.db_worker_health.artifacts_status, DbWorkerSignalStatus::Ok);
+        assert_eq!(
+            agent.db_worker_health.inventory_status,
+            DbWorkerSignalStatus::Ok
+        );
+        assert_eq!(
+            agent.db_worker_health.artifacts_status,
+            DbWorkerSignalStatus::Ok
+        );
     }
 
     #[tokio::test]
@@ -8597,7 +9642,12 @@ upload_buffer_size = 32768
         let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
         agent.cfg.endpoint_metrics_url = None;
         server
-            .enqueue(Method::POST, DEFAULT_NODE_METRICS_PATH, HyperStatusCode::CREATED, "")
+            .enqueue(
+                Method::POST,
+                DEFAULT_NODE_METRICS_PATH,
+                HyperStatusCode::CREATED,
+                "",
+            )
             .await;
 
         agent.push_node_metrics_snapshot().await;
@@ -8639,8 +9689,13 @@ upload_buffer_size = 32768
         let body: serde_json::Value = serde_json::from_str(&telemetry_request.body).unwrap();
         assert_eq!(body["source"], "external");
         assert_eq!(body["node_telemetry"][0]["external_node_id"], "node-1");
-        assert_eq!(body["node_telemetry"][0]["raw"]["applied_revision"], "rev-7");
-        assert!(body["node_telemetry"][0]["infra"]["active_connections"].as_u64().is_some());
+        assert_eq!(
+            body["node_telemetry"][0]["raw"]["applied_revision"],
+            "rev-7"
+        );
+        assert!(body["node_telemetry"][0]["infra"]["active_connections"]
+            .as_u64()
+            .is_some());
     }
 
     #[cfg(feature = "legacy-lk-http")]

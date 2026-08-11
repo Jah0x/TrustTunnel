@@ -60,6 +60,7 @@ pub(crate) enum TcpDestination {
 }
 
 pub(crate) trait PeerAddr {
+    #[allow(dead_code)]
     fn peer_addr(&self) -> io::Result<SocketAddr>;
 }
 

@@ -1,7 +1,6 @@
 {
-  "ul-indent": {
-    "indent": 4
-  },
+  "ul-indent": false,
+  "ol-prefix": false,
   "ul-style": {
     "style": "dash"
   },

@@ -149,6 +149,12 @@ Optional:
 - `AGENT_TELEMETRY_PUSH_INTERVAL_SEC` (default `60`)
 - `LK_METRICS_PATH` (default `/internal/trusttunnel/metrics`)
 - `LK_TELEMETRY_SNAPSHOTS_PATH` (default `/internal/telemetry/snapshots`)
+- `TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED` (default `false`; enables LK route action command polling and ACK delivery)
+- `TRUSTTUNNEL_ROUTE_ACTION_POLL_INTERVAL_SEC` (default `5`)
+- `TRUSTTUNNEL_ROUTE_ACTION_STATE_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/route_action_state.json`)
+- `TRUSTTUNNEL_ROUTE_ACTION_ACK_OUTBOX_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/pending_route_action_acks.jsonl`)
+- `LK_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/route-actions/commands`)
+- `LK_ROUTE_ACTION_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/route-actions/acks`)
 - `TRUSTTUNNEL_ENDPOINT_METRICS_URL` (optional override for scraping endpoint Prometheus metrics)
 - `AGENT_SPEEDTEST_ENABLED` (default `false`)
 - `AGENT_SPEEDTEST_INTERVAL_SEC` (default `300`)
@@ -180,6 +186,14 @@ Optional:
 - Legacy-only metadata/paths: `NODE_STAGE`, `NODE_CLUSTER`, `NODE_NAMESPACE`,
   `NODE_ROLLOUT_GROUP`, `LK_SYNC_PATH_TEMPLATE`, `LK_SYNC_REPORT_PATH`,
   `TRUSTTUNNEL_RUNTIME_PID_FILE`, `TRUSTTUNNEL_RUNTIME_PROCESS_NAME`
+
+Route action polling is opt-in. With `TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED=true`,
+`classic_agent` accepts only `route_action_command.v1` commands with
+`action=observe_noop`, writes processed command state to
+`route_action_state.json`, and retries `route_action_ack.v1` rows from
+`pending_route_action_acks.jsonl` until LK accepts them. Unknown actions are
+ACKed as `skipped`; expired commands are ACKed as `expired`. The sidecar does
+not drain, quarantine, reweight, or otherwise mutate runtime traffic.
 
 Legacy TT-link env fallback (used only when link config file cannot be loaded):
 

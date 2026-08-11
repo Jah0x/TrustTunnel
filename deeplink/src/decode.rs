@@ -178,14 +178,12 @@ pub fn decode_tlv_payload(payload: &[u8]) -> Result<DeepLinkConfig> {
                 let (prefix_part, mask_part) = prefix.split_once('/').unwrap_or((&prefix, ""));
                 hex::decode(prefix_part).map_err(|e| {
                     DeepLinkError::InvalidAddress(format!(
-                        "client_random_prefix must be valid hex: {}",
-                        e
+                        "client_random_prefix must be valid hex: {e}"
                     ))
                 })?;
                 hex::decode(mask_part).map_err(|e| {
                     DeepLinkError::InvalidAddress(format!(
-                        "client_random_prefix mask must be valid hex: {}",
-                        e
+                        "client_random_prefix mask must be valid hex: {e}"
                     ))
                 })?;
                 client_random_prefix = Some(prefix);

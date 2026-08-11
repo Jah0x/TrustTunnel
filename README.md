@@ -580,6 +580,12 @@ Optional:
 - `AGENT_TELEMETRY_PUSH_INTERVAL_SEC` (default `60`)
 - `LK_METRICS_PATH` (default `/internal/trusttunnel/metrics`)
 - `LK_TELEMETRY_SNAPSHOTS_PATH` (default `/internal/telemetry/snapshots`)
+- `TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED` (default `false`; enables LK route action command polling and ACK delivery)
+- `TRUSTTUNNEL_ROUTE_ACTION_POLL_INTERVAL_SEC` (default `5`)
+- `TRUSTTUNNEL_ROUTE_ACTION_STATE_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/route_action_state.json`)
+- `TRUSTTUNNEL_ROUTE_ACTION_ACK_OUTBOX_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/pending_route_action_acks.jsonl`)
+- `LK_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/route-actions/commands`)
+- `LK_ROUTE_ACTION_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/route-actions/acks`)
 - `TRUSTTUNNEL_ENDPOINT_METRICS_URL` (optional override for scraping endpoint Prometheus metrics; otherwise derived from `[metrics].address` in `vpn.toml`)
 - `AGENT_SPEEDTEST_ENABLED` (default `false`; enables periodic sidecar speedtest probes)
 - `AGENT_SPEEDTEST_INTERVAL_SEC` (default `300`)
@@ -637,6 +643,7 @@ Classic agent runtime credentials migration and restart recovery:
 - After the first successful apply, the agent creates `.runtime_credentials_primary` in `TRUSTTUNNEL_RUNTIME_DIR` and treats runtime credentials as the source of truth.
 - After this marker exists, restarts do not re-import credentials from bootstrap source.
 - If runtime credentials are lost after migration, bootstrap source is not reused; next successful reconcile reconstructs credentials from current desired state.
+- When `TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED=true`, the sidecar polls LK for `route_action_command.v1` commands, supports only `observe_noop`, persists processed command ids in `route_action_state.json`, and stores `route_action_ack.v1` ACKs in `pending_route_action_acks.jsonl` until LK accepts them.
 
 Classic agent architecture boundaries:
 

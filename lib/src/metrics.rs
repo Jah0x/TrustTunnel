@@ -198,12 +198,7 @@ impl Drop for ClientSessionsCounter {
 }
 
 impl AccountClientSessionsCounter {
-    fn new(
-        metrics: Arc<Metrics>,
-        username: String,
-        protocol: Protocol,
-        client_ip: String,
-    ) -> Self {
+    fn new(metrics: Arc<Metrics>, username: String, protocol: Protocol, client_ip: String) -> Self {
         metrics
             .account_client_sessions
             .with_label_values(&[username.as_str(), protocol.as_str(), client_ip.as_str()])
@@ -313,12 +308,7 @@ async fn handle_request(
             return;
         }
     };
-    let mut codec = Http1Codec::new(
-        context.settings.clone(),
-        io,
-        client_address,
-        log_id.clone(),
-    );
+    let mut codec = Http1Codec::new(context.settings.clone(), io, client_address, log_id.clone());
     let timeout = context.settings.metrics.as_ref().unwrap().request_timeout;
     let stream = match tokio::time::timeout(timeout, codec.listen()).await {
         Ok(Ok(Some(x))) => {

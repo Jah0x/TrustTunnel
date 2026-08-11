@@ -9,6 +9,9 @@ pub const DEFAULT_HEARTBEAT_PATH: &str = "/internal/trusttunnel/v1/nodes/heartbe
 pub const DEFAULT_REGISTER_PATH: &str = "/internal/trusttunnel/v1/nodes/register";
 pub const DEFAULT_NODE_METRICS_PATH: &str = "/internal/trusttunnel/metrics";
 pub const DEFAULT_TELEMETRY_SNAPSHOTS_PATH: &str = "/internal/telemetry/snapshots";
+pub const DEFAULT_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE: &str =
+    "/internal/trusttunnel/v1/nodes/{externalNodeId}/route-actions/commands";
+pub const DEFAULT_ROUTE_ACTION_ACK_PATH: &str = "/internal/trusttunnel/v1/nodes/route-actions/acks";
 
 #[derive(Clone)]
 pub struct LkApiClient {
@@ -21,9 +24,12 @@ pub struct LkApiClient {
     sync_path_template: String,
     node_metrics_path: String,
     telemetry_snapshots_path: String,
+    route_action_commands_path_template: String,
+    route_action_ack_path: String,
 }
 
 impl LkApiClient {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: reqwest::Client,
         base_url: String,
@@ -34,6 +40,8 @@ impl LkApiClient {
         sync_path_template: String,
         node_metrics_path: String,
         telemetry_snapshots_path: String,
+        route_action_commands_path_template: String,
+        route_action_ack_path: String,
     ) -> Self {
         Self {
             client,
@@ -45,6 +53,8 @@ impl LkApiClient {
             sync_path_template,
             node_metrics_path,
             telemetry_snapshots_path,
+            route_action_commands_path_template,
+            route_action_ack_path,
         }
     }
 
@@ -217,9 +227,204 @@ impl LkApiClient {
         Err(MetricsPushError::UnexpectedStatus(status))
     }
 
+    pub async fn route_action_commands(
+        &self,
+        external_node_id: &str,
+    ) -> Result<RouteActionCommandPollResponse, String> {
+        let path = self
+            .route_action_commands_path_template
+            .replace("{externalNodeId}", external_node_id);
+        let response = self
+            .client
+            .get(self.endpoint(&path))
+            .header("Authorization", format!("Bearer {}", self.service_token))
+            .header("X-Internal-Agent-Token", &self.service_token)
+            .send()
+            .await
+            .map_err(|e| format!("route action command poll failed: {e}"))?;
+
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(RouteActionCommandPollResponse::default());
+        }
+        if response.status() != StatusCode::OK {
+            return Err(format!(
+                "route action command poll failed with HTTP {}",
+                response.status()
+            ));
+        }
+
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("failed to read route action command response: {e}"))?;
+        RouteActionCommandPollResponse::from_slice(&bytes)
+    }
+
+    pub async fn push_route_action_ack(
+        &self,
+        payload: &RouteActionAckPayload<'_>,
+    ) -> Result<(), String> {
+        let response = self
+            .client
+            .post(self.endpoint(&self.route_action_ack_path))
+            .header("Authorization", format!("Bearer {}", self.service_token))
+            .header("X-Internal-Agent-Token", &self.service_token)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| format!("route action ACK push failed: {e}"))?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "route action ACK push failed with HTTP {}",
+            response.status()
+        ))
+    }
+
     fn endpoint(&self, path: &str) -> String {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct RouteActionCommandPollResponse {
+    pub commands: Vec<RouteActionCommand>,
+}
+
+impl RouteActionCommandPollResponse {
+    fn from_slice(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.is_empty() {
+            return Ok(Self::default());
+        }
+        let value = serde_json::from_slice::<Value>(bytes)
+            .map_err(|e| format!("failed to parse route action command JSON: {e}"))?;
+        Self::from_value(value)
+    }
+
+    fn from_value(value: Value) -> Result<Self, String> {
+        let (envelope_contract, command_values) = match value {
+            Value::Array(items) => (None, items),
+            Value::Object(mut object) => {
+                let contract = object
+                    .remove("contract_version")
+                    .or_else(|| object.remove("contractVersion"))
+                    .and_then(|value| value.as_str().map(ToString::to_string));
+                if let Some(commands) = object.remove("commands") {
+                    let items = commands.as_array().cloned().ok_or_else(|| {
+                        "route action command envelope field `commands` must be an array"
+                            .to_string()
+                    })?;
+                    (contract, items)
+                } else if object.contains_key("command_id") || object.contains_key("commandId") {
+                    (contract, vec![Value::Object(object)])
+                } else {
+                    (contract, vec![])
+                }
+            }
+            _ => {
+                return Err("route action command response must be an object or array".to_string());
+            }
+        };
+
+        let mut commands = Vec::with_capacity(command_values.len());
+        for value in command_values {
+            let mut command = serde_json::from_value::<RouteActionCommand>(value)
+                .map_err(|e| format!("failed to parse route action command: {e}"))?;
+            if command.contract_version.trim().is_empty() {
+                command.contract_version = envelope_contract.clone().unwrap_or_default();
+            }
+            command.validate_compatibility()?;
+            commands.push(command);
+        }
+        Ok(Self { commands })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct RouteActionCommand {
+    #[serde(default, alias = "contractVersion")]
+    pub contract_version: String,
+    #[serde(alias = "commandId")]
+    pub command_id: String,
+    #[serde(alias = "decisionId")]
+    pub decision_id: String,
+    pub action: String,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default, alias = "leaseId")]
+    pub lease_id: Option<String>,
+    #[serde(default, alias = "leaseOwner")]
+    pub lease_owner: Option<String>,
+    #[serde(default, alias = "leaseExpiresAt")]
+    pub lease_expires_at: Option<String>,
+    #[serde(default, alias = "expiresAt")]
+    pub expires_at: Option<String>,
+    #[serde(default, alias = "expectedRuntimeRevision")]
+    pub expected_runtime_revision: Option<String>,
+    #[serde(default, alias = "expectedPolicyVersion")]
+    pub expected_policy_version: Option<i64>,
+    #[serde(default, alias = "reasonCode")]
+    pub reason_code: Option<String>,
+    #[serde(default, alias = "targetContourId")]
+    pub target_contour_id: Option<String>,
+    #[serde(default, alias = "targetEntrypoint")]
+    pub target_entrypoint: Option<String>,
+    #[serde(default, alias = "targetEntrypointId")]
+    pub target_entrypoint_id: Option<String>,
+    #[serde(default, alias = "targetExternalNodeId")]
+    pub target_external_node_id: Option<String>,
+    #[serde(default)]
+    pub params: Value,
+}
+
+impl RouteActionCommand {
+    pub fn validate_compatibility(&self) -> Result<(), String> {
+        if self.contract_version != "route_action_command.v1" {
+            return Err(
+                "route action command compatibility check failed: contract_version must be route_action_command.v1"
+                    .to_string(),
+            );
+        }
+        if self.command_id.trim().is_empty() {
+            return Err(
+                "route action command compatibility check failed: command_id is empty".to_string(),
+            );
+        }
+        if self.decision_id.trim().is_empty() {
+            return Err(
+                "route action command compatibility check failed: decision_id is empty".to_string(),
+            );
+        }
+        if self.action.trim().is_empty() {
+            return Err(
+                "route action command compatibility check failed: action is empty".to_string(),
+            );
+        }
+        Ok(())
+    }
+}
+
+#[derive(Serialize)]
+pub struct RouteActionAckPayload<'a> {
+    pub contract_version: &'static str,
+    pub ack_id: &'a str,
+    pub command_id: &'a str,
+    pub decision_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_id: Option<&'a str>,
+    pub runtime_id: &'a str,
+    pub runtime_revision: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_policy_version: Option<i64>,
+    pub status: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_reason_code: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<&'a Value>,
+    pub occurred_at: &'a str,
 }
 
 #[derive(Clone)]
@@ -767,6 +972,48 @@ mod tests {
         assert!(value.get("applied").is_none());
         assert!(value.get("details").is_none());
         assert_eq!(value["last_sync_status"], "ok");
+    }
+
+    #[test]
+    fn route_action_command_envelope_uses_versioned_contract() {
+        let raw = br#"{
+            "contract_version":"route_action_command.v1",
+            "commands":[{
+                "command_id":"cmd-1",
+                "decision_id":"decision-1",
+                "lease_id":"lease-1",
+                "action":"observe_noop",
+                "expected_policy_version":42,
+                "expires_at":"2026-08-12T10:15:00Z"
+            }]
+        }"#;
+
+        let parsed = RouteActionCommandPollResponse::from_slice(raw).unwrap();
+
+        assert_eq!(parsed.commands.len(), 1);
+        assert_eq!(
+            parsed.commands[0].contract_version,
+            "route_action_command.v1"
+        );
+        assert_eq!(parsed.commands[0].action, "observe_noop");
+        assert_eq!(parsed.commands[0].lease_id.as_deref(), Some("lease-1"));
+        assert_eq!(parsed.commands[0].expected_policy_version, Some(42));
+    }
+
+    #[test]
+    fn route_action_command_rejects_unknown_contract_version() {
+        let raw = br#"{
+            "contract_version":"route_action_command.v2",
+            "commands":[{
+                "command_id":"cmd-1",
+                "decision_id":"decision-1",
+                "action":"observe_noop"
+            }]
+        }"#;
+
+        let err = RouteActionCommandPollResponse::from_slice(raw).unwrap_err();
+
+        assert!(err.contains("contract_version must be route_action_command.v1"));
     }
 
     #[test]
