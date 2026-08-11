@@ -2333,7 +2333,12 @@ impl Agent {
                 .await?;
             self.metrics
                 .reconcile_total
-                .with_label_values(&[&node, &snapshot.version, "skipped", "onboarding_state"])
+                .with_label_values(&[
+                    node.as_str(),
+                    snapshot.version.as_str(),
+                    "skipped",
+                    "onboarding_state",
+                ])
                 .inc();
             log_event(
                 "info",
@@ -2354,8 +2359,8 @@ impl Agent {
             self.metrics
                 .reconcile_total
                 .with_label_values(&[
-                    &node,
-                    &snapshot.version,
+                    node.as_str(),
+                    snapshot.version.as_str(),
                     "skipped",
                     "reconcile_not_required",
                 ])
@@ -2377,7 +2382,12 @@ impl Agent {
                 .await?;
             self.metrics
                 .reconcile_total
-                .with_label_values(&[&node, &snapshot.version, "failed", "invalid_checksum"])
+                .with_label_values(&[
+                    node.as_str(),
+                    snapshot.version.as_str(),
+                    "failed",
+                    "invalid_checksum",
+                ])
                 .inc();
             self.metrics
                 .last_failed_reconcile
@@ -2410,7 +2420,12 @@ impl Agent {
             );
             self.metrics
                 .reconcile_total
-                .with_label_values(&[&node, &snapshot.version, "unchanged", "none"])
+                .with_label_values(&[
+                    node.as_str(),
+                    snapshot.version.as_str(),
+                    "unchanged",
+                    "none",
+                ])
                 .inc();
             log_event(
                 "info",
@@ -2481,8 +2496,8 @@ impl Agent {
         self.metrics
             .apply_total
             .with_label_values(&[
-                &node,
-                &snapshot.version,
+                node.as_str(),
+                snapshot.version.as_str(),
                 if apply_ok { "success" } else { "failed" },
                 if apply_ok { "none" } else { "apply_or_verify" },
             ])
@@ -2502,7 +2517,7 @@ impl Agent {
         if !apply_ok {
             self.metrics
                 .reconcile_total
-                .with_label_values(&[&node, &snapshot.version, "failed", "apply"])
+                .with_label_values(&[node.as_str(), snapshot.version.as_str(), "failed", "apply"])
                 .inc();
             self.metrics
                 .last_failed_reconcile
@@ -2545,7 +2560,12 @@ impl Agent {
             };
             self.metrics
                 .tt_link_generation_total
-                .with_label_values(&[&node, &snapshot.version, "success", error_class])
+                .with_label_values(&[
+                    node.as_str(),
+                    snapshot.version.as_str(),
+                    "success",
+                    error_class,
+                ])
                 .inc();
             log_event(
                 "info",
@@ -2559,7 +2579,7 @@ impl Agent {
             .await?;
         self.metrics
             .reconcile_total
-            .with_label_values(&[&node, &snapshot.version, "success", "none"])
+            .with_label_values(&[node.as_str(), snapshot.version.as_str(), "success", "none"])
             .inc();
         self.metrics
             .last_successful_reconcile
@@ -3241,7 +3261,7 @@ impl Agent {
             if let Some(metric) = &self.metrics.runtime_health_total {
                 metric
                     .with_label_values(&[
-                        &self.cfg.node_external_id,
+                        self.cfg.node_external_id.as_str(),
                         self.state.applied_revision.as_deref().unwrap_or("none"),
                         "failed",
                         err.kind(),
@@ -3262,7 +3282,7 @@ impl Agent {
         if let Some(metric) = &self.metrics.runtime_health_total {
             metric
                 .with_label_values(&[
-                    &self.cfg.node_external_id,
+                    self.cfg.node_external_id.as_str(),
                     self.state.applied_revision.as_deref().unwrap_or("none"),
                     "success",
                     "none",
@@ -5335,17 +5355,18 @@ fn sum_counter_family_by_label(
 ) -> u64 {
     families
         .iter()
-        .find(|family| family.get_name() == family_name)
+        .find(|family| family.name() == family_name)
         .map(|family| {
             family
                 .get_metric()
                 .iter()
                 .filter(|metric| {
-                    metric.get_label().iter().any(|label| {
-                        label.get_name() == label_name && label.get_value() == expected_value
-                    })
+                    metric
+                        .get_label()
+                        .iter()
+                        .any(|label| label.name() == label_name && label.value() == expected_value)
                 })
-                .map(|metric| metric.get_counter().get_value().round().max(0.0) as u64)
+                .map(|metric| metric.get_counter().value().round().max(0.0) as u64)
                 .sum()
         })
         .unwrap_or(0)
@@ -5354,12 +5375,12 @@ fn sum_counter_family_by_label(
 fn sum_gauge_family(families: &[prometheus::proto::MetricFamily], family_name: &str) -> i64 {
     families
         .iter()
-        .find(|family| family.get_name() == family_name)
+        .find(|family| family.name() == family_name)
         .map(|family| {
             family
                 .get_metric()
                 .iter()
-                .map(|metric| metric.get_gauge().get_value().round() as i64)
+                .map(|metric| metric.get_gauge().value().round() as i64)
                 .sum()
         })
         .unwrap_or(0)
@@ -8240,7 +8261,7 @@ upload_buffer_size = 32768
             .registry
             .gather()
             .iter()
-            .map(|family| family.get_name().to_string())
+            .map(|family| family.name().to_string())
             .collect::<Vec<_>>();
 
         assert!(!names.is_empty());
