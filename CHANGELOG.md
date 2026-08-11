@@ -2,6 +2,7 @@
 
 ## 1.0.28
 
+- [Feature] `classic_agent` can now opt into `route_action_command.v1` polling for `observe_noop`, persist command state, and retry `route_action_ack.v1` delivery from a dedicated ACK outbox without mutating runtime traffic.
 - [Fix] `classic_agent` now restores db-worker heartbeat health to `ok` on clean no-change reconcile passes, so one transient bootstrap retry no longer leaves a healthy node stuck in permanent `degraded` status inside LK.
 - [Feature] `classic_agent` now supports env-driven periodic speedtest probes and attaches last/average/peak throughput snapshots to LK telemetry.
 - [Fix] `classic_agent` now skips steady-state reconcile export/write passes when no runtime changes are pending, preventing needless full TT-link regeneration and repeated LK bulk reposts on every apply tick.
