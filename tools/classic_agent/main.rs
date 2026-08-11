@@ -7517,7 +7517,7 @@ upload_buffer_size = 32768
         let runtime_dir = temp_dir.path();
         std::fs::write(
             runtime_dir.join("tt-link.toml"),
-            "node_external_id = \"node-1\"\nserver_address = \"89.110.100.165:443\"\ncert_domain = \"cdn.securesoft.dev\"\nprotocol = \"http2\"\ndns_servers = []\n",
+            "node_external_id = \"node-1\"\nserver_address = \"89.110.100.165:443\"\ncert_domain = \"cdn.securesoft.dev\"\ncustom_sni = \"cdn.securesoft.dev\"\nprotocol = \"http2\"\ndns_servers = []\n",
         )
         .unwrap();
 
