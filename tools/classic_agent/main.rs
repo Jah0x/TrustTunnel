@@ -68,6 +68,7 @@ const INVENTORY_INGEST_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const SYNC_REPORT_OUTBOX_FILE: &str = "pending_sync_reports.jsonl";
 const ROUTE_ACTION_STATE_FILE: &str = "route_action_state.json";
 const ROUTE_ACTION_ACK_OUTBOX_FILE: &str = "pending_route_action_acks.jsonl";
+const ROUTE_ACTION_DRAIN_MARKER_FILE: &str = "route_action_drain_marker.json";
 const RUNTIME_PRIMARY_MARKER_FILE: &str = ".runtime_credentials_primary";
 const DEFAULT_RUNTIME_VALIDATION_MIN_USERS: usize = 1;
 const DEFAULT_RUNTIME_VALIDATION_MAX_USERS: usize = 100;
@@ -830,6 +831,8 @@ struct RouteActionRuntime {
     poll_interval: Duration,
     state_path: PathBuf,
     ack_outbox_path: PathBuf,
+    drain_marker_path: PathBuf,
+    drain_cmd: Option<String>,
     state: RouteActionState,
     ack_backoff: Duration,
     ack_next_retry_at: Instant,
@@ -861,6 +864,12 @@ impl RouteActionRuntime {
             .map(PathBuf::from)
             .map(|path| resolve_runtime_path(runtime_dir, &path))
             .unwrap_or_else(|| runtime_dir.join(ROUTE_ACTION_ACK_OUTBOX_FILE));
+        let drain_marker_path =
+            optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_DRAIN_MARKER_FILE")
+                .map(PathBuf::from)
+                .map(|path| resolve_runtime_path(runtime_dir, &path))
+                .unwrap_or_else(|| runtime_dir.join(ROUTE_ACTION_DRAIN_MARKER_FILE));
+        let drain_cmd = optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD");
         let state = load_route_action_state(&state_path)
             .await
             .unwrap_or_default();
@@ -870,6 +879,8 @@ impl RouteActionRuntime {
             poll_interval,
             state_path,
             ack_outbox_path,
+            drain_marker_path,
+            drain_cmd,
             state,
             ack_backoff: ROUTE_ACTION_ACK_INITIAL_BACKOFF,
             ack_next_retry_at: Instant::now(),
@@ -2866,6 +2877,9 @@ impl Agent {
                 )
                 .await?;
             }
+            "apply_drain" => {
+                self.handle_apply_drain_route_action(&command).await?;
+            }
             _ => {
                 self.enqueue_route_action_ack(
                     &command,
@@ -2873,7 +2887,7 @@ impl Agent {
                     Some("unsupported_command_action"),
                     Some(serde_json::json!({
                         "action": command.action,
-                        "supported_actions": ["observe_noop"]
+                        "supported_actions": ["observe_noop", "apply_drain"]
                     })),
                 )
                 .await?;
@@ -2886,6 +2900,92 @@ impl Agent {
             }
         }
         Ok(())
+    }
+
+    async fn handle_apply_drain_route_action(
+        &mut self,
+        command: &RouteActionCommand,
+    ) -> Result<(), String> {
+        self.enqueue_route_action_ack(command, "received", None, None)
+            .await?;
+
+        if let Some(target_external_node_id) = command.target_external_node_id.as_deref() {
+            if target_external_node_id != self.cfg.node_external_id {
+                self.enqueue_route_action_ack(
+                    command,
+                    "skipped",
+                    Some("target_node_mismatch"),
+                    Some(serde_json::json!({
+                        "target_external_node_id": target_external_node_id,
+                        "runtime_id": self.cfg.node_external_id
+                    })),
+                )
+                .await?;
+                self.persist_route_action_command(command, "skipped", Some("target_node_mismatch"))
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        persist_route_action_drain_marker(
+            &self.route_actions.drain_marker_path,
+            &build_route_action_drain_marker(&self.cfg.node_external_id, command),
+        )
+        .await?;
+
+        if let Some(cmd) = &self.route_actions.drain_cmd {
+            let status = Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .env("ROUTE_ACTION_COMMAND_ID", &command.command_id)
+                .env("ROUTE_ACTION_DECISION_ID", &command.decision_id)
+                .env("ROUTE_ACTION_LEASE_ID", command.lease_id.as_deref().unwrap_or(""))
+                .env("ROUTE_ACTION_RUNTIME_ID", &self.cfg.node_external_id)
+                .env(
+                    "ROUTE_ACTION_REASON_CODE",
+                    command.reason_code.as_deref().unwrap_or(""),
+                )
+                .env(
+                    "ROUTE_ACTION_TARGET_ENTRYPOINT_ID",
+                    command.target_entrypoint_id.as_deref().unwrap_or(""),
+                )
+                .env(
+                    "ROUTE_ACTION_TARGET_CONTOUR_ID",
+                    command.target_contour_id.as_deref().unwrap_or(""),
+                )
+                .status()
+                .await
+                .map_err(|e| format!("failed to execute TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD: {e}"))?;
+
+            if !status.success() {
+                self.enqueue_route_action_ack(
+                    command,
+                    "failed",
+                    Some("drain_hook_failed"),
+                    Some(serde_json::json!({
+                        "drain_marker_path": self.route_actions.drain_marker_path,
+                        "exit_status": status.to_string()
+                    })),
+                )
+                .await?;
+                self.persist_route_action_command(command, "failed", Some("drain_hook_failed"))
+                    .await?;
+                return Ok(());
+            }
+        }
+
+        self.enqueue_route_action_ack(
+            command,
+            "applied",
+            Some("apply_drain_marker_written"),
+            Some(serde_json::json!({
+                "drain_marker_path": self.route_actions.drain_marker_path,
+                "drain_hook_configured": self.route_actions.drain_cmd.is_some()
+            })),
+        )
+        .await?;
+        self.persist_route_action_command(command, "applied", Some("apply_drain_marker_written"))
+            .await
     }
 
     async fn enqueue_route_action_ack(
@@ -4499,6 +4599,22 @@ struct PendingRouteActionAck {
     occurred_at: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+struct RouteActionDrainMarker {
+    schema_version: u8,
+    runtime_id: String,
+    command_id: String,
+    decision_id: String,
+    lease_id: Option<String>,
+    reason_code: Option<String>,
+    target_contour_id: Option<String>,
+    target_entrypoint: Option<String>,
+    target_entrypoint_id: Option<String>,
+    expected_policy_version: Option<i64>,
+    params: serde_json::Value,
+    applied_at: String,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct AccountExportOwned {
     username: String,
@@ -5583,6 +5699,35 @@ async fn persist_pending_sync_reports(
 async fn load_route_action_state(path: &Path) -> Option<RouteActionState> {
     let bytes = fs::read(path).await.ok()?;
     serde_json::from_slice::<RouteActionState>(&bytes).ok()
+}
+
+fn build_route_action_drain_marker(
+    runtime_id: &str,
+    command: &RouteActionCommand,
+) -> RouteActionDrainMarker {
+    RouteActionDrainMarker {
+        schema_version: 1,
+        runtime_id: runtime_id.to_string(),
+        command_id: command.command_id.clone(),
+        decision_id: command.decision_id.clone(),
+        lease_id: command.lease_id.clone(),
+        reason_code: command.reason_code.clone(),
+        target_contour_id: command.target_contour_id.clone(),
+        target_entrypoint: command.target_entrypoint.clone(),
+        target_entrypoint_id: command.target_entrypoint_id.clone(),
+        expected_policy_version: command.expected_policy_version,
+        params: command.params.clone(),
+        applied_at: chrono::Utc::now().to_rfc3339(),
+    }
+}
+
+async fn persist_route_action_drain_marker(
+    path: &Path,
+    marker: &RouteActionDrainMarker,
+) -> Result<(), String> {
+    let encoded = serde_json::to_vec_pretty(marker)
+        .map_err(|e| format!("failed to serialize route action drain marker JSON: {e}"))?;
+    atomic_write(path, &encoded).await
 }
 
 async fn persist_route_action_state(path: &Path, state: &RouteActionState) -> Result<(), String> {
@@ -7882,6 +8027,78 @@ upload_buffer_size = 32768
 
     #[cfg(feature = "legacy-lk-http")]
     #[tokio::test]
+    async fn route_action_apply_drain_writes_marker_and_flushes_applied_ack() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+        let command_body = route_action_commands_json("cmd-drain-1", "apply_drain", None);
+        server
+            .enqueue(
+                Method::GET,
+                "/internal/trusttunnel/v1/nodes/node-1/route-actions/commands",
+                HyperStatusCode::OK,
+                command_body,
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+
+        agent.route_action_tick().await;
+
+        let stored = agent
+            .route_actions
+            .state
+            .commands
+            .get("cmd-drain-1")
+            .unwrap();
+        assert_eq!(stored.last_status, "applied");
+        assert_eq!(
+            stored.status_reason_code.as_deref(),
+            Some("apply_drain_marker_written")
+        );
+
+        let marker_bytes = fs::read(&agent.route_actions.drain_marker_path)
+            .await
+            .unwrap();
+        let marker = serde_json::from_slice::<RouteActionDrainMarker>(&marker_bytes).unwrap();
+        assert_eq!(marker.command_id, "cmd-drain-1");
+        assert_eq!(marker.runtime_id, "node-1");
+        assert_eq!(marker.expected_policy_version, Some(42));
+
+        let requests = server.captured().await;
+        let ack_bodies = requests
+            .iter()
+            .filter(|request| {
+                request.method == Method::POST
+                    && request.path == "/internal/trusttunnel/v1/nodes/route-actions/acks"
+            })
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ack_bodies.len(), 2);
+        assert_eq!(ack_bodies[0]["status"], "received");
+        assert_eq!(ack_bodies[1]["status"], "applied");
+        assert_eq!(
+            ack_bodies[1]["status_reason_code"],
+            "apply_drain_marker_written"
+        );
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    #[tokio::test]
     async fn route_action_ack_outbox_survives_restart_and_flushes_after_network_failure() {
         let server = MockHttpServer::start().await;
         let tmp_dir = TempDir::new().unwrap();
@@ -7945,7 +8162,11 @@ upload_buffer_size = 32768
         let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
 
         agent
-            .handle_route_action_command(route_action_command("cmd-unknown-1", "apply_drain", None))
+            .handle_route_action_command(route_action_command(
+                "cmd-unknown-1",
+                "apply_quarantine",
+                None,
+            ))
             .await
             .unwrap();
         agent
