@@ -123,7 +123,7 @@ pub fn encode_tlv_payload(config: &DeepLinkConfig) -> Result<Vec<u8>> {
 pub fn encode(config: &DeepLinkConfig) -> Result<String> {
     let payload = encode_tlv_payload(config)?;
     let encoded = encode_base64url(&payload);
-    Ok(format!("{PREFIX}{}", encoded))
+    Ok(format!("{PREFIX}{encoded}"))
 }
 
 #[cfg(test)]

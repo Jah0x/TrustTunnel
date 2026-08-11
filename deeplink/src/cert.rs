@@ -7,7 +7,7 @@ pub fn pem_to_der(pem: &str) -> Result<Vec<u8>> {
     let mut cursor = Cursor::new(pem.as_bytes());
 
     let certs = rustls_pemfile::certs(&mut cursor)
-        .map_err(|e| DeepLinkError::InvalidCertificate(format!("PEM parsing failed: {}", e)))?;
+        .map_err(|e| DeepLinkError::InvalidCertificate(format!("PEM parsing failed: {e}")))?;
 
     if certs.is_empty() {
         return Err(DeepLinkError::InvalidCertificate(

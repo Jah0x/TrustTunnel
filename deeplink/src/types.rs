@@ -81,8 +81,7 @@ impl FromStr for Protocol {
             "http2" => Ok(Protocol::Http2),
             "http3" => Ok(Protocol::Http3),
             _ => Err(DeepLinkError::InvalidAddress(format!(
-                "unknown upstream_protocol: {}",
-                s
+                "unknown upstream_protocol: {s}"
             ))),
         }
     }
@@ -235,8 +234,7 @@ impl DeepLinkConfigBuilder {
             if !prefix.is_empty() {
                 hex::decode(prefix).map_err(|e| {
                     DeepLinkError::InvalidAddress(format!(
-                        "client_random_prefix must be valid hex: {}",
-                        e
+                        "client_random_prefix must be valid hex: {e}"
                     ))
                 })?;
             }
