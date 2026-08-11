@@ -1,7 +1,7 @@
 use crate::http_codec::{HttpCodec, RequestHeaders, ResponseHeaders};
 use crate::settings::Settings;
 use crate::tls_demultiplexer::Protocol;
-use crate::{datagram_pipe, http_codec, log_id, log_utils, net_utils, pipe};
+use crate::{datagram_pipe, http_codec, log_id, log_utils, pipe};
 use async_trait::async_trait;
 use bytes::Bytes;
 use h2::server::{Connection, Handshake, SendResponse};

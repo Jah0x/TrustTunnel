@@ -382,7 +382,7 @@ impl Core {
 
         let line = std::str::from_utf8(&line)
             .map_err(|_| io::Error::new(ErrorKind::InvalidData, "PROXY header is not UTF-8"))?;
-        let mut parts = line.trim_end().split_whitespace();
+        let mut parts = line.split_whitespace();
         let signature = parts.next();
         let family = parts.next();
         let source_ip = parts.next();
