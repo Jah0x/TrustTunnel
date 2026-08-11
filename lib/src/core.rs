@@ -843,12 +843,18 @@ impl Core {
         IO: 'static + AsyncRead + AsyncWrite + Unpin + Send + PeerAddr,
     {
         match protocol {
-            tls_demultiplexer::Protocol::Http1 => {
-                Ok(Box::new(Http1Codec::new(core_settings, io, client_address, log_id)))
-            }
-            tls_demultiplexer::Protocol::Http2 => {
-                Ok(Box::new(Http2Codec::new(core_settings, io, client_address, log_id)?))
-            }
+            tls_demultiplexer::Protocol::Http1 => Ok(Box::new(Http1Codec::new(
+                core_settings,
+                io,
+                client_address,
+                log_id,
+            ))),
+            tls_demultiplexer::Protocol::Http2 => Ok(Box::new(Http2Codec::new(
+                core_settings,
+                io,
+                client_address,
+                log_id,
+            )?)),
             tls_demultiplexer::Protocol::Http3 => unreachable!(),
         }
     }

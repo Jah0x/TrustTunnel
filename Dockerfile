@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1.85-bookworm AS build-base
+FROM rust:1.88-bookworm AS build-base
 ARG ENDPOINT_DIR_NAME="TrustTunnel"
 WORKDIR /home/${ENDPOINT_DIR_NAME}
 
@@ -24,7 +24,7 @@ COPY tools ./tools
 FROM build-base AS build-endpoint
 RUN cargo build --release --bin trusttunnel_endpoint --bin setup_wizard
 
-FROM rust:1.85-bookworm AS build-classic-agent
+FROM rust:1.88-bookworm AS build-classic-agent
 ARG ENDPOINT_DIR_NAME="TrustTunnel"
 ARG BUILD_GIT_SHA="unknown"
 ARG BUILD_TIMESTAMP="unknown"

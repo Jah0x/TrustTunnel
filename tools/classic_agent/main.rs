@@ -535,9 +535,7 @@ impl Config {
             .transpose()?
             .unwrap_or(DEFAULT_SPEEDTEST_DOWNLOAD_MB);
         if !(1..=100).contains(&speedtest_download_mb) {
-            return Err(
-                "AGENT_SPEEDTEST_DOWNLOAD_MB must be in range 1..=100".to_string(),
-            );
+            return Err("AGENT_SPEEDTEST_DOWNLOAD_MB must be in range 1..=100".to_string());
         }
         let speedtest_upload_mb = optional_env_nonempty("AGENT_SPEEDTEST_UPLOAD_MB")
             .map(|raw| {
@@ -552,9 +550,9 @@ impl Config {
         }
         let speedtest_timeout = optional_env_nonempty("AGENT_SPEEDTEST_TIMEOUT_SEC")
             .map(|raw| {
-                let secs = raw.parse::<u64>().map_err(|e| {
-                    format!("AGENT_SPEEDTEST_TIMEOUT_SEC must be u64 seconds: {e}")
-                })?;
+                let secs = raw
+                    .parse::<u64>()
+                    .map_err(|e| format!("AGENT_SPEEDTEST_TIMEOUT_SEC must be u64 seconds: {e}"))?;
                 Ok::<Duration, String>(Duration::from_secs(secs))
             })
             .transpose()?
@@ -864,11 +862,10 @@ impl RouteActionRuntime {
             .map(PathBuf::from)
             .map(|path| resolve_runtime_path(runtime_dir, &path))
             .unwrap_or_else(|| runtime_dir.join(ROUTE_ACTION_ACK_OUTBOX_FILE));
-        let drain_marker_path =
-            optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_DRAIN_MARKER_FILE")
-                .map(PathBuf::from)
-                .map(|path| resolve_runtime_path(runtime_dir, &path))
-                .unwrap_or_else(|| runtime_dir.join(ROUTE_ACTION_DRAIN_MARKER_FILE));
+        let drain_marker_path = optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_DRAIN_MARKER_FILE")
+            .map(PathBuf::from)
+            .map(|path| resolve_runtime_path(runtime_dir, &path))
+            .unwrap_or_else(|| runtime_dir.join(ROUTE_ACTION_DRAIN_MARKER_FILE));
         let drain_cmd = optional_env_nonempty("TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD");
         let state = load_route_action_state(&state_path)
             .await
@@ -2939,7 +2936,10 @@ impl Agent {
                 .arg(cmd)
                 .env("ROUTE_ACTION_COMMAND_ID", &command.command_id)
                 .env("ROUTE_ACTION_DECISION_ID", &command.decision_id)
-                .env("ROUTE_ACTION_LEASE_ID", command.lease_id.as_deref().unwrap_or(""))
+                .env(
+                    "ROUTE_ACTION_LEASE_ID",
+                    command.lease_id.as_deref().unwrap_or(""),
+                )
                 .env("ROUTE_ACTION_RUNTIME_ID", &self.cfg.node_external_id)
                 .env(
                     "ROUTE_ACTION_REASON_CODE",
@@ -2955,7 +2955,9 @@ impl Agent {
                 )
                 .status()
                 .await
-                .map_err(|e| format!("failed to execute TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD: {e}"))?;
+                .map_err(|e| {
+                    format!("failed to execute TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD: {e}")
+                })?;
 
             if !status.success() {
                 self.enqueue_route_action_ack(
@@ -3284,7 +3286,9 @@ impl Agent {
 
     fn collect_runtime_status(&self) -> RuntimeStatus {
         match self.cfg.runtime_mode {
-            RuntimeMode::DbWorker => RuntimeStatus::collect_db_worker(&self.cfg.runtime_credentials_path),
+            RuntimeMode::DbWorker => {
+                RuntimeStatus::collect_db_worker(&self.cfg.runtime_credentials_path)
+            }
             RuntimeMode::LegacyHttp => RuntimeStatus::collect(
                 self.cfg
                     .runtime_pid_path
@@ -3546,8 +3550,9 @@ impl Agent {
                     .as_secs_f64();
                 if elapsed > 0.0 {
                     let bytes_delta = total_bytes.saturating_sub(previous.total_bytes) as f64;
-                    let bandwidth_mbps =
-                        ((bytes_delta * 8.0) / elapsed / 1_000_000.0).round().max(0.0) as u64;
+                    let bandwidth_mbps = ((bytes_delta * 8.0) / elapsed / 1_000_000.0)
+                        .round()
+                        .max(0.0) as u64;
                     let active_delta =
                         active_connections.saturating_sub(previous.active_connections) as f64;
                     let establish_rate = (active_delta / elapsed).round().max(0.0) as u64;
@@ -3596,7 +3601,9 @@ impl Agent {
             error_rate,
             endpoint_metrics_available: endpoint_metrics.is_some(),
             endpoint_metrics_url,
-            endpoint_inbound_bytes: endpoint_metrics.as_ref().and_then(|item| item.inbound_bytes),
+            endpoint_inbound_bytes: endpoint_metrics
+                .as_ref()
+                .and_then(|item| item.inbound_bytes),
             endpoint_outbound_bytes: endpoint_metrics
                 .as_ref()
                 .and_then(|item| item.outbound_bytes),
@@ -4815,27 +4822,30 @@ async fn run_speedtest_probe(
         endpoint_config_path,
     )
     .await?;
-    let client = build_speedtest_client(&target, timeout).map_err(|message| SpeedtestProbeFailure {
-        enabled: true,
-        target_url: Some(target.display_url.clone()),
-        message,
-    })?;
+    let client =
+        build_speedtest_client(&target, timeout).map_err(|message| SpeedtestProbeFailure {
+            enabled: true,
+            target_url: Some(target.display_url.clone()),
+            message,
+        })?;
     let download_url = format!("{}/{}mb.bin", target.base_url, download_mb);
     let upload_url = format!("{}/upload.html", target.base_url);
-    let (download_duration_ms, downloaded_bytes) = execute_speedtest_download(&client, &download_url)
-        .await
-        .map_err(|message| SpeedtestProbeFailure {
-            enabled: true,
-            target_url: Some(target.display_url.clone()),
-            message,
-        })?;
-    let (upload_duration_ms, uploaded_bytes) = execute_speedtest_upload(&client, &upload_url, upload_mb)
-        .await
-        .map_err(|message| SpeedtestProbeFailure {
-            enabled: true,
-            target_url: Some(target.display_url.clone()),
-            message,
-        })?;
+    let (download_duration_ms, downloaded_bytes) =
+        execute_speedtest_download(&client, &download_url)
+            .await
+            .map_err(|message| SpeedtestProbeFailure {
+                enabled: true,
+                target_url: Some(target.display_url.clone()),
+                message,
+            })?;
+    let (upload_duration_ms, uploaded_bytes) =
+        execute_speedtest_upload(&client, &upload_url, upload_mb)
+            .await
+            .map_err(|message| SpeedtestProbeFailure {
+                enabled: true,
+                target_url: Some(target.display_url.clone()),
+                message,
+            })?;
 
     Ok(SpeedtestProbeSample {
         collected_at: chrono::Utc::now(),
@@ -4869,20 +4879,20 @@ async fn derive_speedtest_target(
         });
     }
 
-    let speedtest_path =
-        load_speedtest_path_from_config(endpoint_config_path)
-            .await
-            .map_err(|message| SpeedtestProbeFailure {
-                enabled: false,
-                target_url: None,
-                message,
-            })?;
-    let link_cfg = LinkGenerationConfig::load_from_file_or_legacy_env(link_config_path, node_external_id)
+    let speedtest_path = load_speedtest_path_from_config(endpoint_config_path)
+        .await
         .map_err(|message| SpeedtestProbeFailure {
-            enabled: true,
+            enabled: false,
             target_url: None,
             message,
         })?;
+    let link_cfg =
+        LinkGenerationConfig::load_from_file_or_legacy_env(link_config_path, node_external_id)
+            .map_err(|message| SpeedtestProbeFailure {
+                enabled: true,
+                target_url: None,
+                message,
+            })?;
     let address_host = link_cfg.address_host();
     let request_host = link_cfg
         .custom_sni()
@@ -4911,9 +4921,13 @@ async fn derive_speedtest_target(
     })
 }
 
-fn build_speedtest_client(target: &SpeedtestTarget, timeout: Duration) -> Result<reqwest::Client, String> {
+fn build_speedtest_client(
+    target: &SpeedtestTarget,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder().timeout(timeout).no_proxy();
-    if let (Some(request_host), Some(resolved_addr)) = (&target.request_host, target.resolved_addr) {
+    if let (Some(request_host), Some(resolved_addr)) = (&target.request_host, target.resolved_addr)
+    {
         builder = builder.resolve(request_host, resolved_addr);
     }
     builder
@@ -4977,9 +4991,12 @@ async fn load_speedtest_path_from_config(config_path: &Path) -> Result<String, S
             config_path.display()
         )
     })?;
-    let doc = raw
-        .parse::<toml_edit::Document>()
-        .map_err(|e| format!("failed to parse endpoint config {}: {e}", config_path.display()))?;
+    let doc = raw.parse::<toml_edit::Document>().map_err(|e| {
+        format!(
+            "failed to parse endpoint config {}: {e}",
+            config_path.display()
+        )
+    })?;
     let enabled = doc
         .get("speedtest_enable")
         .and_then(|item| item.as_bool())
@@ -5023,7 +5040,9 @@ fn format_https_base_url(host: &str, port: u16, path: &str) -> String {
 }
 
 fn normalize_host(host: &str) -> String {
-    host.trim().trim_matches(&['[', ']'][..]).to_ascii_lowercase()
+    host.trim()
+        .trim_matches(&['[', ']'][..])
+        .to_ascii_lowercase()
 }
 
 fn normalize_base_url(raw: &str) -> Option<String> {
@@ -5145,7 +5164,11 @@ fn parse_endpoint_account_activity_metrics(body: &str) -> Vec<EndpointAccountAct
         ) {
             continue;
         }
-        let Some(username) = sample.labels.get("username").filter(|value| !value.is_empty()) else {
+        let Some(username) = sample
+            .labels
+            .get("username")
+            .filter(|value| !value.is_empty())
+        else {
             continue;
         };
         let protocol = sample
@@ -5161,12 +5184,14 @@ fn parse_endpoint_account_activity_metrics(body: &str) -> Vec<EndpointAccountAct
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
         let key = (username.clone(), protocol.clone(), client_ip.clone());
-        let item = by_key.entry(key).or_insert_with(|| EndpointAccountActivity {
-            username: username.clone(),
-            protocol,
-            client_ip,
-            ..Default::default()
-        });
+        let item = by_key
+            .entry(key)
+            .or_insert_with(|| EndpointAccountActivity {
+                username: username.clone(),
+                protocol,
+                client_ip,
+                ..Default::default()
+            });
         let value = sample.value.round().max(0.0) as u64;
         match sample.name.as_str() {
             "account_client_sessions" => item.active_connections = value,
@@ -6293,9 +6318,18 @@ client_sessions{protocol_type="http2"} 3
 inbound_traffic_bytes{protocol_type="http2"} 128
 "#;
 
-        assert_eq!(parse_prometheus_sum_metric(body, "client_sessions"), Some(5));
-        assert_eq!(parse_prometheus_sum_metric(body, "inbound_traffic_bytes"), Some(128));
-        assert_eq!(parse_prometheus_sum_metric(body, "outbound_traffic_bytes"), None);
+        assert_eq!(
+            parse_prometheus_sum_metric(body, "client_sessions"),
+            Some(5)
+        );
+        assert_eq!(
+            parse_prometheus_sum_metric(body, "inbound_traffic_bytes"),
+            Some(128)
+        );
+        assert_eq!(
+            parse_prometheus_sum_metric(body, "outbound_traffic_bytes"),
+            None
+        );
     }
 
     #[tokio::test]
@@ -8889,8 +8923,14 @@ upload_buffer_size = 32768
             .unwrap();
 
         assert!(!fs::try_exists(&state_path).await.unwrap());
-        assert_eq!(agent.db_worker_health.inventory_status, DbWorkerSignalStatus::Ok);
-        assert_eq!(agent.db_worker_health.artifacts_status, DbWorkerSignalStatus::Ok);
+        assert_eq!(
+            agent.db_worker_health.inventory_status,
+            DbWorkerSignalStatus::Ok
+        );
+        assert_eq!(
+            agent.db_worker_health.artifacts_status,
+            DbWorkerSignalStatus::Ok
+        );
     }
 
     #[tokio::test]
@@ -9581,7 +9621,12 @@ upload_buffer_size = 32768
         let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
         agent.cfg.endpoint_metrics_url = None;
         server
-            .enqueue(Method::POST, DEFAULT_NODE_METRICS_PATH, HyperStatusCode::CREATED, "")
+            .enqueue(
+                Method::POST,
+                DEFAULT_NODE_METRICS_PATH,
+                HyperStatusCode::CREATED,
+                "",
+            )
             .await;
 
         agent.push_node_metrics_snapshot().await;
@@ -9623,8 +9668,13 @@ upload_buffer_size = 32768
         let body: serde_json::Value = serde_json::from_str(&telemetry_request.body).unwrap();
         assert_eq!(body["source"], "external");
         assert_eq!(body["node_telemetry"][0]["external_node_id"], "node-1");
-        assert_eq!(body["node_telemetry"][0]["raw"]["applied_revision"], "rev-7");
-        assert!(body["node_telemetry"][0]["infra"]["active_connections"].as_u64().is_some());
+        assert_eq!(
+            body["node_telemetry"][0]["raw"]["applied_revision"],
+            "rev-7"
+        );
+        assert!(body["node_telemetry"][0]["infra"]["active_connections"]
+            .as_u64()
+            .is_some());
     }
 
     #[cfg(feature = "legacy-lk-http")]
