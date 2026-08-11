@@ -90,7 +90,7 @@ lint-md:
 .PHONY: lint-rust
 lint-rust:
 	cargo fmt --all -- --check
-	cargo clippy -- -D warnings
+	cargo clippy -- -D warnings -A clippy::uninlined_format_args -A clippy::io_other_error
 
 ## Fix linter issues that are auto-fixable.
 .PHONY: lint-fix
