@@ -16,12 +16,13 @@ use credentials_inventory::{
 use exporter::{EndpointExportOptions, EndpointLinkExporter};
 use legacy::lk_api::{
     Account, AccountExportPayload, HeartbeatPayload, HeartbeatStats, LkApiClient, NodeMetadata,
-    NodeMetricsPayload, OnboardingPayload, RouteActionAckPayload, RouteActionCommand, SyncPayload,
-    SyncReportPayload, SyncResponse, TelemetryAccountActivityPayload, TelemetryInfraPayload,
-    TelemetryNodePayload, TelemetrySnapshotPayload, DEFAULT_HEARTBEAT_PATH,
-    DEFAULT_NODE_METRICS_PATH, DEFAULT_REGISTER_PATH, DEFAULT_ROUTE_ACTION_ACK_PATH,
-    DEFAULT_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE, DEFAULT_SYNC_PATH_TEMPLATE,
-    DEFAULT_SYNC_REPORT_PATH, DEFAULT_TELEMETRY_SNAPSHOTS_PATH,
+    NodeMetricsPayload, OnboardingPayload, RouteActionAckPayload, RouteActionCommand,
+    RuntimeEntrypointAckPayload, SyncPayload, SyncReportPayload, SyncResponse,
+    TelemetryAccountActivityPayload, TelemetryInfraPayload, TelemetryNodePayload,
+    TelemetrySnapshotPayload, DEFAULT_HEARTBEAT_PATH, DEFAULT_NODE_METRICS_PATH,
+    DEFAULT_REGISTER_PATH, DEFAULT_ROUTE_ACTION_ACK_PATH,
+    DEFAULT_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE, DEFAULT_RUNTIME_ENTRYPOINT_ACK_PATH,
+    DEFAULT_SYNC_PATH_TEMPLATE, DEFAULT_SYNC_REPORT_PATH, DEFAULT_TELEMETRY_SNAPSHOTS_PATH,
 };
 use link_config::LinkGenerationConfig;
 use lk_bulk_writer::{LkArtifactRecord, LkBulkWriter, LkWriteContract};
@@ -39,7 +40,7 @@ use std::time::Duration;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
-use tokio::net::{lookup_host, TcpListener};
+use tokio::net::{lookup_host, TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::sync::Mutex;
 use tokio::time::{interval, Instant, MissedTickBehavior};
@@ -63,6 +64,8 @@ const DEFAULT_SPEEDTEST_DOWNLOAD_MB: u32 = 25;
 const DEFAULT_SPEEDTEST_UPLOAD_MB: u32 = 10;
 const DEFAULT_SPEEDTEST_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_SPEEDTEST_HISTORY_LIMIT: usize = 24;
+const DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const INVENTORY_INGEST_ATTEMPTS: usize = 3;
 const INVENTORY_INGEST_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const SYNC_REPORT_OUTBOX_FILE: &str = "pending_sync_reports.jsonl";
@@ -242,6 +245,10 @@ struct Config {
     metrics_push_interval: Duration,
     telemetry_push_interval: Duration,
     speedtest_interval: Duration,
+    runtime_entrypoint_ack_enabled: bool,
+    runtime_entrypoint_ack_interval: Duration,
+    runtime_entrypoint_ack_probe_timeout: Duration,
+    runtime_entrypoint_id: Option<String>,
     lk_metrics_path: String,
     lk_telemetry_snapshots_path: String,
     endpoint_metrics_url: Option<String>,
@@ -571,6 +578,43 @@ impl Config {
         if speedtest_enabled && speedtest_history_limit == 0 {
             return Err("AGENT_SPEEDTEST_HISTORY_LIMIT must be greater than zero".to_string());
         }
+        let runtime_entrypoint_ack_enabled =
+            env_flag_enabled("TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_ENABLED");
+        let runtime_entrypoint_ack_interval =
+            optional_env_nonempty("TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_INTERVAL_SEC")
+                .map(|raw| {
+                    let secs = raw.parse::<u64>().map_err(|e| {
+                format!("TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_INTERVAL_SEC must be u64 seconds: {e}")
+            })?;
+                    Ok::<Duration, String>(Duration::from_secs(secs))
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL);
+        if runtime_entrypoint_ack_enabled && runtime_entrypoint_ack_interval.is_zero() {
+            return Err(
+                "TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_INTERVAL_SEC must be greater than zero"
+                    .to_string(),
+            );
+        }
+        let runtime_entrypoint_ack_probe_timeout =
+            optional_env_nonempty("TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT_SEC")
+                .map(|raw| {
+                    let secs = raw.parse::<u64>().map_err(|e| {
+                        format!(
+                    "TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT_SEC must be u64 seconds: {e}"
+                )
+                    })?;
+                    Ok::<Duration, String>(Duration::from_secs(secs))
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT);
+        if runtime_entrypoint_ack_enabled && runtime_entrypoint_ack_probe_timeout.is_zero() {
+            return Err(
+                "TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT_SEC must be greater than zero"
+                    .to_string(),
+            );
+        }
+        let runtime_entrypoint_id = optional_env_nonempty("TRUSTTUNNEL_ENTRYPOINT_ID");
         let debug_preserve_temp_files = optional_env_nonempty("TRUSTTUNNEL_DEBUG_KEEP_TEMP_FILES")
             .map(|raw| {
                 matches!(
@@ -674,6 +718,10 @@ impl Config {
             metrics_push_interval,
             telemetry_push_interval,
             speedtest_interval,
+            runtime_entrypoint_ack_enabled,
+            runtime_entrypoint_ack_interval,
+            runtime_entrypoint_ack_probe_timeout,
+            runtime_entrypoint_id,
             lk_metrics_path,
             lk_telemetry_snapshots_path,
             endpoint_metrics_url,
@@ -1189,6 +1237,8 @@ impl Agent {
                 .unwrap_or_else(|| DEFAULT_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE.to_string());
         let route_action_ack_path = optional_env_nonempty("LK_ROUTE_ACTION_ACK_PATH")
             .unwrap_or_else(|| DEFAULT_ROUTE_ACTION_ACK_PATH.to_string());
+        let runtime_entrypoint_ack_path = optional_env_nonempty("LK_RUNTIME_ENTRYPOINT_ACK_PATH")
+            .unwrap_or_else(|| DEFAULT_RUNTIME_ENTRYPOINT_ACK_PATH.to_string());
         let lk_api = LkApiClient::new(
             client.clone(),
             lk_base_url,
@@ -1201,6 +1251,7 @@ impl Agent {
             cfg.lk_telemetry_snapshots_path.clone(),
             route_action_commands_path_template,
             route_action_ack_path,
+            runtime_entrypoint_ack_path,
         );
 
         let metrics = Arc::new(AgentMetrics::new(&node_metadata.node_external_id)?);
@@ -1376,6 +1427,8 @@ impl Agent {
         telemetry_push_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut speedtest_tick = interval(self.cfg.speedtest_interval);
         speedtest_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut runtime_entrypoint_ack_tick = interval(self.cfg.runtime_entrypoint_ack_interval);
+        runtime_entrypoint_ack_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut route_action_tick = interval(self.route_actions.poll_interval);
         route_action_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut backoff = Duration::from_secs(1);
@@ -1398,6 +1451,10 @@ impl Agent {
                 }
                 _ = speedtest_tick.tick(), if self.cfg.speedtest_enabled => {
                     self.start_speedtest_probe();
+                    continue;
+                }
+                _ = runtime_entrypoint_ack_tick.tick(), if self.cfg.runtime_entrypoint_ack_enabled => {
+                    self.push_runtime_entrypoint_ack().await;
                     continue;
                 }
                 _ = route_action_tick.tick(), if self.route_actions.enabled => {
@@ -2232,6 +2289,8 @@ impl Agent {
         telemetry_push_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut speedtest_tick = interval(self.cfg.speedtest_interval);
         speedtest_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut runtime_entrypoint_ack_tick = interval(self.cfg.runtime_entrypoint_ack_interval);
+        runtime_entrypoint_ack_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut sync_report_tick = interval(Duration::from_secs(1));
         sync_report_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut route_action_tick = interval(self.route_actions.poll_interval);
@@ -2268,6 +2327,9 @@ impl Agent {
                 }
                 _ = speedtest_tick.tick(), if self.cfg.speedtest_enabled => {
                     self.start_speedtest_probe();
+                }
+                _ = runtime_entrypoint_ack_tick.tick(), if self.cfg.runtime_entrypoint_ack_enabled => {
+                    self.push_runtime_entrypoint_ack().await;
                 }
                 _ = sync_report_tick.tick() => {
                     self.flush_pending_sync_reports().await;
@@ -3477,6 +3539,71 @@ impl Agent {
         }
     }
 
+    async fn push_runtime_entrypoint_ack(&self) {
+        let link_config_path = resolve_runtime_path(
+            &self.cfg.trusttunnel_runtime_dir,
+            &self.cfg.trusttunnel_link_config_file,
+        );
+        let link_cfg = match LinkGenerationConfig::load_from_file_or_legacy_env(
+            &link_config_path,
+            &self.cfg.node_external_id,
+        ) {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                log_error(
+                    self.state.applied_revision.as_deref().unwrap_or("none"),
+                    &self.cfg.node_external_id,
+                    "runtime_entrypoint_ack_build_failed",
+                    "link_config_unavailable",
+                    &err,
+                );
+                return;
+            }
+        };
+        let observed_at = chrono::Utc::now().to_rfc3339();
+        let observation =
+            match build_runtime_entrypoint_observation(&self.cfg, &link_cfg, &observed_at).await {
+                Ok(item) => item,
+                Err(err) => {
+                    log_error(
+                        self.state.applied_revision.as_deref().unwrap_or("none"),
+                        &self.cfg.node_external_id,
+                        "runtime_entrypoint_ack_build_failed",
+                        "probe_failed",
+                        &err,
+                    );
+                    return;
+                }
+            };
+        let payload = observation.as_payload();
+        println!(
+            "phase=runtime_entrypoint_ack_sent node={} entrypoint={} observed={}:{} bind_scope={} listen_ok={}",
+            self.cfg.node_external_id,
+            observation.entrypoint_id.as_deref().unwrap_or("<unknown>"),
+            observation.observed_host,
+            observation.observed_port,
+            observation.bind_scope,
+            observation.listen_ok
+        );
+        match self.lk_api.push_runtime_entrypoint_ack(&payload).await {
+            Ok(()) => {
+                println!(
+                    "phase=runtime_entrypoint_ack_accepted node={} ack_id={} listen_ok={}",
+                    self.cfg.node_external_id, observation.ack_id, observation.listen_ok
+                );
+            }
+            Err(err) => {
+                log_error(
+                    self.state.applied_revision.as_deref().unwrap_or("none"),
+                    &self.cfg.node_external_id,
+                    "runtime_entrypoint_ack_push_failed",
+                    "lk_api_error",
+                    &err,
+                );
+            }
+        }
+    }
+
     fn start_speedtest_probe(&self) {
         if !self.cfg.speedtest_enabled {
             return;
@@ -4626,6 +4753,55 @@ struct PendingRouteActionAck {
     occurred_at: String,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct RuntimeEntrypointObservation {
+    ack_id: String,
+    external_node_id: String,
+    entrypoint_id: Option<String>,
+    runtime_id: String,
+    runtime_kind: String,
+    observed_host: String,
+    observed_port: u16,
+    bind_scope: String,
+    protocol: String,
+    listen_ok: bool,
+    external_probe_ok: Option<bool>,
+    runtime_revision: String,
+    sidecar_version: String,
+    evidence: serde_json::Value,
+    last_ack_at: String,
+}
+
+impl RuntimeEntrypointObservation {
+    fn as_payload(&self) -> RuntimeEntrypointAckPayload<'_> {
+        RuntimeEntrypointAckPayload {
+            contract_version: "entrypoint_runtime_ack.v1",
+            ack_id: &self.ack_id,
+            external_node_id: &self.external_node_id,
+            entrypoint_id: self.entrypoint_id.as_deref(),
+            runtime_id: &self.runtime_id,
+            runtime_kind: &self.runtime_kind,
+            observed_host: &self.observed_host,
+            observed_port: self.observed_port,
+            bind_scope: &self.bind_scope,
+            protocol: &self.protocol,
+            listen_ok: self.listen_ok,
+            external_probe_ok: self.external_probe_ok,
+            runtime_revision: &self.runtime_revision,
+            sidecar_version: &self.sidecar_version,
+            evidence: Some(&self.evidence),
+            last_ack_at: &self.last_ack_at,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RuntimeListenObservation {
+    listen_address: Option<SocketAddr>,
+    bind_scope: String,
+    bind_covers_advertised_endpoint: bool,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct RouteActionDrainMarker {
     schema_version: u8,
@@ -4824,6 +5000,151 @@ struct SpeedtestProbeFailure {
     enabled: bool,
     target_url: Option<String>,
     message: String,
+}
+
+async fn build_runtime_entrypoint_observation(
+    cfg: &Config,
+    link_cfg: &LinkGenerationConfig,
+    observed_at: &str,
+) -> Result<RuntimeEntrypointObservation, String> {
+    let observed_host = link_cfg.address_host();
+    let observed_port = link_cfg.port().unwrap_or(443);
+    let listen = load_runtime_listen_observation(
+        &cfg.trusttunnel_config_file,
+        &observed_host,
+        observed_port,
+    )
+    .await?;
+    let probe_ok = if listen.bind_covers_advertised_endpoint {
+        probe_tcp_listener(
+            &observed_host,
+            observed_port,
+            cfg.runtime_entrypoint_ack_probe_timeout,
+        )
+        .await
+    } else {
+        false
+    };
+    let listen_ok = listen.bind_covers_advertised_endpoint && probe_ok;
+    let entrypoint_id = cfg.runtime_entrypoint_id.clone();
+    let fallback_entrypoint_label = link_cfg.server_address();
+    let entrypoint_label = entrypoint_id
+        .as_deref()
+        .unwrap_or(fallback_entrypoint_label.as_str());
+    let runtime_id = format!(
+        "classic_agent:{}:{}",
+        cfg.node_external_id, entrypoint_label
+    );
+    let evidence = serde_json::json!({
+        "probe_kind": "local_tcp_connect",
+        "probe_ok": probe_ok,
+        "bind_covers_advertised_endpoint": listen.bind_covers_advertised_endpoint,
+        "configured_listen_address": listen.listen_address.map(|item| item.to_string()),
+        "advertised_host": observed_host,
+        "advertised_port": observed_port,
+        "link_config_hash": link_cfg.config_hash(),
+    });
+    let ack_id_seed = format!(
+        "{}:{}:{}:{}:{}",
+        cfg.node_external_id,
+        entrypoint_id.as_deref().unwrap_or("unknown"),
+        observed_host,
+        observed_port,
+        observed_at
+    );
+
+    Ok(RuntimeEntrypointObservation {
+        ack_id: format!(
+            "tt-runtime-ack-{}",
+            &sha256_hex(ack_id_seed.as_bytes())[..20]
+        ),
+        external_node_id: cfg.node_external_id.clone(),
+        entrypoint_id,
+        runtime_id,
+        runtime_kind: "trusttunnel_sidecar".to_string(),
+        observed_host,
+        observed_port,
+        bind_scope: listen.bind_scope,
+        protocol: link_cfg.protocol().to_string(),
+        listen_ok,
+        external_probe_ok: None,
+        runtime_revision: cfg.runtime_version.clone(),
+        sidecar_version: cfg.agent_version.clone(),
+        evidence,
+        last_ack_at: observed_at.to_string(),
+    })
+}
+
+async fn load_runtime_listen_observation(
+    endpoint_config_path: &Path,
+    observed_host: &str,
+    observed_port: u16,
+) -> Result<RuntimeListenObservation, String> {
+    let raw = fs::read_to_string(endpoint_config_path)
+        .await
+        .map_err(|e| {
+            format!(
+                "failed to read runtime endpoint config {}: {e}",
+                endpoint_config_path.display()
+            )
+        })?;
+    let parsed = raw.parse::<toml::Value>().map_err(|e| {
+        format!(
+            "failed to parse runtime endpoint config {} as TOML: {e}",
+            endpoint_config_path.display()
+        )
+    })?;
+    let listen_raw = parsed
+        .get("listen_address")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(listen_raw) = listen_raw else {
+        return Ok(RuntimeListenObservation {
+            listen_address: None,
+            bind_scope: "not_listening".to_string(),
+            bind_covers_advertised_endpoint: false,
+        });
+    };
+    let listen_address = listen_raw
+        .parse::<SocketAddr>()
+        .map_err(|e| format!("runtime listen_address must be socket address host:port: {e}"))?;
+    let bind_scope = bind_scope_for_ip(listen_address.ip()).to_string();
+    let bind_covers_advertised_endpoint = listen_address.port() == observed_port
+        && bind_covers_host(listen_address.ip(), observed_host);
+
+    Ok(RuntimeListenObservation {
+        listen_address: Some(listen_address),
+        bind_scope,
+        bind_covers_advertised_endpoint,
+    })
+}
+
+fn bind_scope_for_ip(ip: IpAddr) -> &'static str {
+    if ip.is_unspecified() {
+        return match ip {
+            IpAddr::V4(_) => "all_ipv4",
+            IpAddr::V6(_) => "all_ipv6",
+        };
+    }
+    "specific_ip"
+}
+
+fn bind_covers_host(bind_ip: IpAddr, observed_host: &str) -> bool {
+    if bind_ip.is_unspecified() {
+        return true;
+    }
+    observed_host
+        .parse::<IpAddr>()
+        .is_ok_and(|observed_ip| observed_ip == bind_ip)
+}
+
+async fn probe_tcp_listener(host: &str, port: u16, timeout: Duration) -> bool {
+    let target = format!("{host}:{port}");
+    matches!(
+        tokio::time::timeout(timeout, TcpStream::connect(target)).await,
+        Ok(Ok(_))
+    )
 }
 
 async fn run_speedtest_probe(
@@ -7108,6 +7429,10 @@ message_queue_capacity = 4096
             telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
             speedtest_enabled: false,
             speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: false,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -7125,6 +7450,73 @@ message_queue_capacity = 4096
         };
 
         Agent::new(cfg).await.unwrap()
+    }
+
+    fn runtime_ack_test_config(
+        runtime_dir: &Path,
+        config_path: &Path,
+        entrypoint_id: Option<&str>,
+    ) -> Config {
+        Config {
+            lk_base_url: Some("https://lk.example".to_string()),
+            runtime_mode: RuntimeMode::DbWorker,
+            lk_write_contract: LkWriteContract::Api,
+            lk_db_dsn:
+                "https://lk.example/internal/trusttunnel/v1/nodes/{externalNodeId}/artifacts"
+                    .to_string(),
+            lk_service_token: Some("token".to_string()),
+            node_external_id: "node-1".to_string(),
+            node_hostname: "node-1.example".to_string(),
+            node_stage: None,
+            node_cluster: None,
+            node_namespace: None,
+            node_rollout_group: None,
+            trusttunnel_runtime_dir: runtime_dir.to_path_buf(),
+            trusttunnel_config_file: config_path.to_path_buf(),
+            trusttunnel_hosts_file: runtime_dir.join("hosts.toml"),
+            bootstrap_credentials_source_path: None,
+            trusttunnel_link_config_file: runtime_dir.join("tt-link.toml"),
+            runtime_credentials_path: runtime_dir.join("credentials.toml"),
+            runtime_primary_marker_path: runtime_dir.join(RUNTIME_PRIMARY_MARKER_FILE),
+            agent_state_path: runtime_dir.join("agent_state.json"),
+            reconcile_interval: Duration::from_secs(60),
+            apply_interval: Duration::from_secs(60),
+            heartbeat_interval: DEFAULT_DB_WORKER_HEARTBEAT_INTERVAL,
+            sync_path_template: None,
+            sync_report_path: None,
+            apply_cmd: None,
+            runtime_pid_path: None,
+            runtime_process_name: None,
+            endpoint_binary: "trusttunnel_endpoint".to_string(),
+            agent_version: "test-agent".to_string(),
+            runtime_version: "test-runtime".to_string(),
+            pending_sync_reports_path: None,
+            metrics_address: "127.0.0.1:9901".parse().unwrap(),
+            metrics_push_enabled: false,
+            telemetry_push_enabled: false,
+            speedtest_enabled: false,
+            metrics_push_interval: DEFAULT_METRICS_PUSH_INTERVAL,
+            telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
+            speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: true,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: entrypoint_id.map(ToString::to_string),
+            lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
+            lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
+            endpoint_metrics_url: None,
+            speedtest_url: None,
+            speedtest_download_mb: DEFAULT_SPEEDTEST_DOWNLOAD_MB,
+            speedtest_upload_mb: DEFAULT_SPEEDTEST_UPLOAD_MB,
+            speedtest_timeout: DEFAULT_SPEEDTEST_TIMEOUT,
+            speedtest_history_limit: DEFAULT_SPEEDTEST_HISTORY_LIMIT,
+            debug_preserve_temp_files: false,
+            debug_verbose_export_logs: false,
+            validation_strict_mode: false,
+            syntax_validation_diagnostic_only: false,
+            runtime_validation_min_users: DEFAULT_RUNTIME_VALIDATION_MIN_USERS,
+            runtime_validation_max_users: DEFAULT_RUNTIME_VALIDATION_MAX_USERS,
+        }
     }
 
     async fn make_db_worker_agent_for_validation_tests(
@@ -7239,6 +7631,10 @@ upload_buffer_size = 32768
             telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
             speedtest_enabled: false,
             speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: false,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -7501,6 +7897,10 @@ upload_buffer_size = 32768
             telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
             speedtest_enabled: false,
             speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: false,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -7615,6 +8015,10 @@ upload_buffer_size = 32768
             telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
             speedtest_enabled: false,
             speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: false,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -7713,6 +8117,10 @@ upload_buffer_size = 32768
             telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
             speedtest_enabled: false,
             speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: false,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -7924,6 +8332,10 @@ upload_buffer_size = 32768
             telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
             speedtest_enabled: false,
             speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: false,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -8711,6 +9123,10 @@ upload_buffer_size = 32768
             telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
             speedtest_enabled: false,
             speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: false,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -9820,6 +10236,73 @@ upload_buffer_size = 32768
         assert!(err.contains("host:port or [ipv6]:port"));
     }
 
+    #[tokio::test]
+    async fn runtime_entrypoint_observation_reports_live_specific_ip_listener() {
+        let tmp_dir = TempDir::new().unwrap();
+        let runtime_dir = tmp_dir.path().join("runtime");
+        fs::create_dir_all(&runtime_dir).await.unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listen_addr = listener.local_addr().unwrap();
+        let _accept_task = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let config_path = runtime_dir.join("vpn.toml");
+        fs::write(
+            &config_path,
+            format!("listen_address = \"{}\"\n", listen_addr),
+        )
+        .await
+        .unwrap();
+        let link_cfg = toml::from_str::<LinkGenerationConfig>(&format!(
+            "node_external_id = \"node-1\"\naddress_host = \"127.0.0.1\"\nport = {}\ncert_domain = \"node-1.example\"\ncustom_sni = \"node-1.example\"\nprotocol = \"http2\"\n",
+            listen_addr.port()
+        ))
+        .unwrap();
+        let cfg = runtime_ack_test_config(&runtime_dir, &config_path, Some("entrypoint-a"));
+
+        let observation =
+            build_runtime_entrypoint_observation(&cfg, &link_cfg, "2026-08-13T12:00:00Z")
+                .await
+                .unwrap();
+
+        assert!(observation.listen_ok);
+        assert_eq!(observation.bind_scope, "specific_ip");
+        assert_eq!(observation.entrypoint_id.as_deref(), Some("entrypoint-a"));
+        assert_eq!(observation.observed_port, listen_addr.port());
+        assert_eq!(
+            observation.as_payload().contract_version,
+            "entrypoint_runtime_ack.v1"
+        );
+    }
+
+    #[tokio::test]
+    async fn runtime_entrypoint_observation_rejects_port_mismatch() {
+        let tmp_dir = TempDir::new().unwrap();
+        let runtime_dir = tmp_dir.path().join("runtime");
+        fs::create_dir_all(&runtime_dir).await.unwrap();
+        let config_path = runtime_dir.join("vpn.toml");
+        fs::write(&config_path, "listen_address = \"127.0.0.1:443\"\n")
+            .await
+            .unwrap();
+        let link_cfg = toml::from_str::<LinkGenerationConfig>(
+            "node_external_id = \"node-1\"\naddress_host = \"127.0.0.1\"\nport = 444\ncert_domain = \"node-1.example\"\ncustom_sni = \"node-1.example\"\nprotocol = \"http2\"\n",
+        )
+        .unwrap();
+        let cfg = runtime_ack_test_config(&runtime_dir, &config_path, None);
+
+        let observation =
+            build_runtime_entrypoint_observation(&cfg, &link_cfg, "2026-08-13T12:00:00Z")
+                .await
+                .unwrap();
+
+        assert!(!observation.listen_ok);
+        assert_eq!(observation.bind_scope, "specific_ip");
+        assert_eq!(
+            observation.evidence["bind_covers_advertised_endpoint"],
+            serde_json::Value::Bool(false)
+        );
+    }
+
     #[test]
     fn derive_inventory_endpoint_replaces_artifacts_path() {
         let endpoint = derive_inventory_endpoint(
@@ -9969,6 +10452,10 @@ upload_buffer_size = 32768
             telemetry_push_interval: DEFAULT_TELEMETRY_PUSH_INTERVAL,
             speedtest_enabled: false,
             speedtest_interval: DEFAULT_SPEEDTEST_INTERVAL,
+            runtime_entrypoint_ack_enabled: false,
+            runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
+            runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
+            runtime_entrypoint_id: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,

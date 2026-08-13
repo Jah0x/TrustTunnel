@@ -155,6 +155,11 @@ Optional:
 - `TRUSTTUNNEL_ROUTE_ACTION_ACK_OUTBOX_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/pending_route_action_acks.jsonl`)
 - `LK_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/route-actions/commands`)
 - `LK_ROUTE_ACTION_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/route-actions/acks`)
+- `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_ENABLED` (default `false`; sends LK proof that the advertised entrypoint is actually covered by the runtime bind and local TCP probe)
+- `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_INTERVAL_SEC` (default `30`)
+- `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT_SEC` (default `2`)
+- `TRUSTTUNNEL_ENTRYPOINT_ID` (optional stable LK entrypoint id, for example `infra-b-tt:rescue-ip-80-85-247-253`)
+- `LK_RUNTIME_ENTRYPOINT_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/runtime-entrypoint-acks`)
 - `TRUSTTUNNEL_ENDPOINT_METRICS_URL` (optional override for scraping endpoint Prometheus metrics)
 - `AGENT_SPEEDTEST_ENABLED` (default `false`)
 - `AGENT_SPEEDTEST_INTERVAL_SEC` (default `300`)
@@ -194,6 +199,14 @@ Route action polling is opt-in. With `TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED=true`,
 `pending_route_action_acks.jsonl` until LK accepts them. Unknown actions are
 ACKed as `skipped`; expired commands are ACKed as `expired`. The sidecar does
 not drain, quarantine, reweight, or otherwise mutate runtime traffic.
+
+Runtime entrypoint ACK is opt-in. With
+`TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_ENABLED=true`, `classic_agent` reads
+`tt-link.toml` and `vpn.toml`, classifies the runtime bind
+(`specific_ip`, `all_ipv4`, `all_ipv6`, or `not_listening`), performs a bounded
+local TCP connect probe to the advertised host/port, and posts
+`entrypoint_runtime_ack.v1` to LK. This ACK is evidence only; LK decides whether
+an entrypoint can be used for route actions or rescue failover.
 
 Legacy TT-link env fallback (used only when link config file cannot be loaded):
 
@@ -299,6 +312,7 @@ Diagnostics include contract mode:
 - Prometheus endpoint: `GET /metrics` on `AGENT_METRICS_ADDRESS`.
 - LK metric delivery: periodic `POST /internal/trusttunnel/metrics` and `POST /internal/telemetry/snapshots`, keyed by `external_node_id`, with optional endpoint Prometheus scraping for active sessions and bandwidth.
 - Lifecycle register payload also includes endpoint metadata derived from `tt-link.toml`: `public_host`, `endpoint_ip`, `port`, `cert_domain`, `custom_sni`. LK uses these fields to keep auto-registered nodes in sync with the actual IP/SNI client contract.
+- Runtime entrypoint ACK logs include `phase=runtime_entrypoint_ack_sent|runtime_entrypoint_ack_accepted`, `entrypoint`, `observed_host`, `observed_port`, `bind_scope`, and `listen_ok`.
 - Speedtest telemetry can attach `status`, `target_url`, `samples`, `last_result`,
   `rolling_average`, `peak`, and `last_error` to LK telemetry snapshots.
 - Register failures keep a compact `response_preview` instead of dumping raw
