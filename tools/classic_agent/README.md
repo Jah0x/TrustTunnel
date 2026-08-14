@@ -160,12 +160,6 @@ Optional:
 - `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT_SEC` (default `2`)
 - `TRUSTTUNNEL_ENTRYPOINT_ID` (optional stable LK entrypoint id, for example `infra-b-tt:rescue-ip-80-85-247-253`)
 - `LK_RUNTIME_ENTRYPOINT_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/runtime-entrypoint-acks`)
-- `OUTLINE_RUNTIME_ENTRYPOINT_ACK_ENABLED` (default `false`; additionally reports an Outline/Shadowsocks listener as `runtime_kind=outline_shadowsocks`)
-- `OUTLINE_ENTRYPOINT_ID` (optional stable LK entrypoint id for the Outline fallback address)
-- `OUTLINE_ENTRYPOINT_HOST` (required when Outline ACK is enabled; public Outline fallback host/IP)
-- `OUTLINE_ENTRYPOINT_PORT` (default `443`)
-- `OUTLINE_LISTEN_ADDRESS` (required when Outline ACK is enabled; exact local socket such as `80.85.247.254:443`)
-- `OUTLINE_RUNTIME_REVISION` (optional Outline runtime version/revision reported to LK)
 - `TRUSTTUNNEL_ENDPOINT_METRICS_URL` (optional override for scraping endpoint Prometheus metrics)
 - `AGENT_SPEEDTEST_ENABLED` (default `false`)
 - `AGENT_SPEEDTEST_INTERVAL_SEC` (default `300`)
@@ -318,8 +312,7 @@ Diagnostics include contract mode:
 - Prometheus endpoint: `GET /metrics` on `AGENT_METRICS_ADDRESS`.
 - LK metric delivery: periodic `POST /internal/trusttunnel/metrics` and `POST /internal/telemetry/snapshots`, keyed by `external_node_id`, with optional endpoint Prometheus scraping for active sessions and bandwidth.
 - Lifecycle register payload also includes endpoint metadata derived from `tt-link.toml`: `public_host`, `endpoint_ip`, `port`, `cert_domain`, `custom_sni`. LK uses these fields to keep auto-registered nodes in sync with the actual IP/SNI client contract.
-- Runtime entrypoint ACK logs include `phase=runtime_entrypoint_ack_sent|runtime_entrypoint_ack_accepted`, `runtime_kind`, `entrypoint`, `observed_host`, `observed_port`, `bind_scope`, and `listen_ok`.
-- Outline fallback ACK is listener-readiness only. The agent reports socket/probe evidence and never logs or sends Outline access keys.
+- Runtime entrypoint ACK logs include `phase=runtime_entrypoint_ack_sent|runtime_entrypoint_ack_accepted`, `entrypoint`, `observed_host`, `observed_port`, `bind_scope`, and `listen_ok`.
 - Speedtest telemetry can attach `status`, `target_url`, `samples`, `last_result`,
   `rolling_average`, `peak`, and `last_error` to LK telemetry snapshots.
 - Register failures keep a compact `response_preview` instead of dumping raw

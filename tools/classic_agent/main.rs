@@ -3540,7 +3540,6 @@ impl Agent {
     }
 
     async fn push_runtime_entrypoint_ack(&self) {
-        let observed_at = chrono::Utc::now().to_rfc3339();
         let link_config_path = resolve_runtime_path(
             &self.cfg.trusttunnel_runtime_dir,
             &self.cfg.trusttunnel_link_config_file,
@@ -3561,8 +3560,8 @@ impl Agent {
                 return;
             }
         };
-        let mut observations = Vec::new();
-        observations.push(
+        let observed_at = chrono::Utc::now().to_rfc3339();
+        let observation =
             match build_runtime_entrypoint_observation(&self.cfg, &link_cfg, &observed_at).await {
                 Ok(item) => item,
                 Err(err) => {
@@ -3575,67 +3574,32 @@ impl Agent {
                     );
                     return;
                 }
-            },
+            };
+        let payload = observation.as_payload();
+        println!(
+            "phase=runtime_entrypoint_ack_sent node={} entrypoint={} observed={}:{} bind_scope={} listen_ok={}",
+            self.cfg.node_external_id,
+            observation.entrypoint_id.as_deref().unwrap_or("<unknown>"),
+            observation.observed_host,
+            observation.observed_port,
+            observation.bind_scope,
+            observation.listen_ok
         );
-
-        match load_outline_runtime_ack_config() {
-            Ok(Some(outline_cfg)) => match build_outline_runtime_entrypoint_observation(
-                &self.cfg,
-                &outline_cfg,
-                &observed_at,
-            )
-            .await
-            {
-                Ok(item) => observations.push(item),
-                Err(err) => log_error(
+        match self.lk_api.push_runtime_entrypoint_ack(&payload).await {
+            Ok(()) => {
+                println!(
+                    "phase=runtime_entrypoint_ack_accepted node={} ack_id={} listen_ok={}",
+                    self.cfg.node_external_id, observation.ack_id, observation.listen_ok
+                );
+            }
+            Err(err) => {
+                log_error(
                     self.state.applied_revision.as_deref().unwrap_or("none"),
                     &self.cfg.node_external_id,
-                    "runtime_entrypoint_ack_build_failed",
-                    "outline_probe_failed",
+                    "runtime_entrypoint_ack_push_failed",
+                    "lk_api_error",
                     &err,
-                ),
-            },
-            Ok(None) => {}
-            Err(err) => log_error(
-                self.state.applied_revision.as_deref().unwrap_or("none"),
-                &self.cfg.node_external_id,
-                "runtime_entrypoint_ack_build_failed",
-                "outline_config_invalid",
-                &err,
-            ),
-        }
-
-        for observation in observations {
-            let payload = observation.as_payload();
-            println!(
-                "phase=runtime_entrypoint_ack_sent node={} runtime_kind={} entrypoint={} observed={}:{} bind_scope={} listen_ok={}",
-                self.cfg.node_external_id,
-                observation.runtime_kind,
-                observation.entrypoint_id.as_deref().unwrap_or("<unknown>"),
-                observation.observed_host,
-                observation.observed_port,
-                observation.bind_scope,
-                observation.listen_ok
-            );
-            match self.lk_api.push_runtime_entrypoint_ack(&payload).await {
-                Ok(()) => {
-                    println!(
-                        "phase=runtime_entrypoint_ack_accepted node={} runtime_kind={} ack_id={} listen_ok={}",
-                        self.cfg.node_external_id,
-                        observation.runtime_kind,
-                        observation.ack_id,
-                        observation.listen_ok
-                    );
-                }
-                Err(err) => {
-                    log_error(
-                        self.state.applied_revision.as_deref().unwrap_or("none"),
-                        &self.cfg.node_external_id,
-                        "runtime_entrypoint_ack_push_failed",
-                        "lk_api_error",
-                        &err,
-                    );
-                }
+                );
             }
         }
     }
@@ -4838,15 +4802,6 @@ struct RuntimeListenObservation {
     bind_covers_advertised_endpoint: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct OutlineRuntimeAckConfig {
-    entrypoint_id: Option<String>,
-    observed_host: String,
-    observed_port: u16,
-    listen_address: SocketAddr,
-    runtime_revision: Option<String>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 struct RouteActionDrainMarker {
     schema_version: u8,
@@ -5114,110 +5069,6 @@ async fn build_runtime_entrypoint_observation(
         listen_ok,
         external_probe_ok: None,
         runtime_revision: cfg.runtime_version.clone(),
-        sidecar_version: cfg.agent_version.clone(),
-        evidence,
-        last_ack_at: observed_at.to_string(),
-    })
-}
-
-fn load_outline_runtime_ack_config() -> Result<Option<OutlineRuntimeAckConfig>, String> {
-    if !env_flag_enabled("OUTLINE_RUNTIME_ENTRYPOINT_ACK_ENABLED") {
-        return Ok(None);
-    }
-    let observed_host = optional_env_nonempty("OUTLINE_ENTRYPOINT_HOST").ok_or_else(|| {
-        "OUTLINE_ENTRYPOINT_HOST is required when Outline runtime ACK is enabled".to_string()
-    })?;
-    let observed_port = optional_env_nonempty("OUTLINE_ENTRYPOINT_PORT")
-        .map(|raw| {
-            raw.parse::<u16>()
-                .map_err(|e| format!("OUTLINE_ENTRYPOINT_PORT must be a TCP/UDP port: {e}"))
-        })
-        .transpose()?
-        .unwrap_or(443);
-    if observed_port == 0 {
-        return Err("OUTLINE_ENTRYPOINT_PORT must be greater than zero".to_string());
-    }
-    let listen_address = optional_env_nonempty("OUTLINE_LISTEN_ADDRESS")
-        .ok_or_else(|| {
-            "OUTLINE_LISTEN_ADDRESS is required when Outline runtime ACK is enabled".to_string()
-        })?
-        .parse::<SocketAddr>()
-        .map_err(|e| format!("OUTLINE_LISTEN_ADDRESS must be socket address host:port: {e}"))?;
-
-    Ok(Some(OutlineRuntimeAckConfig {
-        entrypoint_id: optional_env_nonempty("OUTLINE_ENTRYPOINT_ID"),
-        observed_host,
-        observed_port,
-        listen_address,
-        runtime_revision: optional_env_nonempty("OUTLINE_RUNTIME_REVISION"),
-    }))
-}
-
-async fn build_outline_runtime_entrypoint_observation(
-    cfg: &Config,
-    outline_cfg: &OutlineRuntimeAckConfig,
-    observed_at: &str,
-) -> Result<RuntimeEntrypointObservation, String> {
-    let bind_scope = bind_scope_for_ip(outline_cfg.listen_address.ip()).to_string();
-    let bind_covers_advertised_endpoint = outline_cfg.listen_address.port()
-        == outline_cfg.observed_port
-        && bind_covers_host(outline_cfg.listen_address.ip(), &outline_cfg.observed_host);
-    let probe_ok = if bind_covers_advertised_endpoint {
-        probe_tcp_listener(
-            &outline_cfg.observed_host,
-            outline_cfg.observed_port,
-            cfg.runtime_entrypoint_ack_probe_timeout,
-        )
-        .await
-    } else {
-        false
-    };
-    let listen_ok = bind_covers_advertised_endpoint && probe_ok;
-    let entrypoint_label = outline_cfg
-        .entrypoint_id
-        .as_deref()
-        .unwrap_or(outline_cfg.observed_host.as_str());
-    let runtime_id = format!(
-        "classic_agent:{}:outline:{}",
-        cfg.node_external_id, entrypoint_label
-    );
-    let evidence = serde_json::json!({
-        "probe_kind": "local_tcp_connect",
-        "probe_ok": probe_ok,
-        "bind_covers_advertised_endpoint": bind_covers_advertised_endpoint,
-        "configured_listen_address": outline_cfg.listen_address.to_string(),
-        "advertised_host": outline_cfg.observed_host,
-        "advertised_port": outline_cfg.observed_port,
-        "port_conflict_possible": !bind_covers_advertised_endpoint,
-    });
-    let ack_id_seed = format!(
-        "{}:outline:{}:{}:{}:{}",
-        cfg.node_external_id,
-        outline_cfg.entrypoint_id.as_deref().unwrap_or("unknown"),
-        outline_cfg.observed_host,
-        outline_cfg.observed_port,
-        observed_at
-    );
-
-    Ok(RuntimeEntrypointObservation {
-        ack_id: format!(
-            "outline-runtime-ack-{}",
-            &sha256_hex(ack_id_seed.as_bytes())[..20]
-        ),
-        external_node_id: cfg.node_external_id.clone(),
-        entrypoint_id: outline_cfg.entrypoint_id.clone(),
-        runtime_id,
-        runtime_kind: "outline_shadowsocks".to_string(),
-        observed_host: outline_cfg.observed_host.clone(),
-        observed_port: outline_cfg.observed_port,
-        bind_scope,
-        protocol: "outline_shadowsocks".to_string(),
-        listen_ok,
-        external_probe_ok: None,
-        runtime_revision: outline_cfg
-            .runtime_revision
-            .clone()
-            .unwrap_or_else(|| cfg.runtime_version.clone()),
         sidecar_version: cfg.agent_version.clone(),
         evidence,
         last_ack_at: observed_at.to_string(),
@@ -10449,86 +10300,6 @@ upload_buffer_size = 32768
         assert_eq!(
             observation.evidence["bind_covers_advertised_endpoint"],
             serde_json::Value::Bool(false)
-        );
-    }
-
-    #[tokio::test]
-    async fn outline_runtime_entrypoint_observation_reports_live_listener() {
-        let tmp_dir = TempDir::new().unwrap();
-        let runtime_dir = tmp_dir.path().join("runtime");
-        fs::create_dir_all(&runtime_dir).await.unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let listen_addr = listener.local_addr().unwrap();
-        let _accept_task = tokio::spawn(async move {
-            let _ = listener.accept().await;
-        });
-        let config_path = runtime_dir.join("vpn.toml");
-        fs::write(&config_path, "listen_address = \"127.0.0.1:443\"\n")
-            .await
-            .unwrap();
-        let cfg = runtime_ack_test_config(&runtime_dir, &config_path, None);
-        let outline_cfg = OutlineRuntimeAckConfig {
-            entrypoint_id: Some("controller:outline-ip-127-0-0-1".to_string()),
-            observed_host: "127.0.0.1".to_string(),
-            observed_port: listen_addr.port(),
-            listen_address: listen_addr,
-            runtime_revision: Some("outline-test".to_string()),
-        };
-
-        let observation = build_outline_runtime_entrypoint_observation(
-            &cfg,
-            &outline_cfg,
-            "2026-08-13T12:00:00Z",
-        )
-        .await
-        .unwrap();
-
-        assert!(observation.listen_ok);
-        assert_eq!(observation.runtime_kind, "outline_shadowsocks");
-        assert_eq!(observation.protocol, "outline_shadowsocks");
-        assert_eq!(
-            observation.entrypoint_id.as_deref(),
-            Some("controller:outline-ip-127-0-0-1")
-        );
-        assert_eq!(observation.runtime_revision, "outline-test");
-        assert_eq!(observation.evidence["probe_kind"], "local_tcp_connect");
-    }
-
-    #[tokio::test]
-    async fn outline_runtime_entrypoint_observation_reports_port_conflict() {
-        let tmp_dir = TempDir::new().unwrap();
-        let runtime_dir = tmp_dir.path().join("runtime");
-        fs::create_dir_all(&runtime_dir).await.unwrap();
-        let config_path = runtime_dir.join("vpn.toml");
-        fs::write(&config_path, "listen_address = \"127.0.0.1:443\"\n")
-            .await
-            .unwrap();
-        let cfg = runtime_ack_test_config(&runtime_dir, &config_path, None);
-        let outline_cfg = OutlineRuntimeAckConfig {
-            entrypoint_id: Some("controller:outline-ip-127-0-0-1".to_string()),
-            observed_host: "127.0.0.1".to_string(),
-            observed_port: 443,
-            listen_address: "0.0.0.0:8443".parse().unwrap(),
-            runtime_revision: None,
-        };
-
-        let observation = build_outline_runtime_entrypoint_observation(
-            &cfg,
-            &outline_cfg,
-            "2026-08-13T12:00:00Z",
-        )
-        .await
-        .unwrap();
-
-        assert!(!observation.listen_ok);
-        assert_eq!(observation.bind_scope, "all_ipv4");
-        assert_eq!(
-            observation.evidence["bind_covers_advertised_endpoint"],
-            serde_json::Value::Bool(false)
-        );
-        assert_eq!(
-            observation.evidence["port_conflict_possible"],
-            serde_json::Value::Bool(true)
         );
     }
 
