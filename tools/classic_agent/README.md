@@ -160,6 +160,13 @@ Optional:
 - `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT_SEC` (default `2`)
 - `TRUSTTUNNEL_ENTRYPOINT_ID` (optional stable LK entrypoint id, for example `infra-b-tt:rescue-ip-80-85-247-253`)
 - `LK_RUNTIME_ENTRYPOINT_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/runtime-entrypoint-acks`)
+- `TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_ENABLED` (default `false`; enables LK access-pair target lease polling and ACK delivery)
+- `TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_INTERVAL_SEC` (default `10`)
+- `TRUSTTUNNEL_ACCESS_PAIR_TARGET_LEASE_SEC` (default `120`, max `600`)
+- `TRUSTTUNNEL_ACCESS_PAIR_TARGET_RUNTIME_ID` (optional runtime lease owner; falls back to `TRUSTTUNNEL_RUNTIME_ID` then `NODE_EXTERNAL_ID`)
+- `TRUSTTUNNEL_ACCESS_PAIR_SECRETS_FILE` (optional local `[[client]]` secret source for legacy registry credential targets)
+- `LK_ACCESS_PAIR_TARGETS_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/access-pair-targets`)
+- `LK_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/access-pair-targets/ack`)
 - `TRUSTTUNNEL_ENDPOINT_METRICS_URL` (optional override for scraping endpoint Prometheus metrics)
 - `AGENT_SPEEDTEST_ENABLED` (default `false`)
 - `AGENT_SPEEDTEST_INTERVAL_SEC` (default `300`)
@@ -207,6 +214,18 @@ Runtime entrypoint ACK is opt-in. With
 local TCP connect probe to the advertised host/port, and posts
 `entrypoint_runtime_ack.v1` to LK. This ACK is evidence only; LK decides whether
 an entrypoint can be used for route actions or rescue failover.
+
+Access-pair target sync is opt-in. With
+`TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_ENABLED=true`, `classic_agent` leases
+`access_pair_targets.v1` rows from LK and posts `access_pair_target_ack.v1`.
+For `auth_mode=lk_signed`, the agent ACKs `applied` only when `vpn.toml`
+contains enabled `lk_signed_auth` with at least one verification key. For
+legacy registry credentials, the agent applies the target through the existing
+candidate credentials validation, atomic promote, apply hook, post-apply verify,
+and rollback pipeline using `TRUSTTUNNEL_ACCESS_PAIR_SECRETS_FILE` or existing
+runtime credentials as the local secret source. Missing local secrets are ACKed
+as `sync_status=error` with `local_access_pair_secret_missing`; they are never
+reported as applied.
 
 Legacy TT-link env fallback (used only when link config file cannot be loaded):
 
@@ -313,6 +332,7 @@ Diagnostics include contract mode:
 - LK metric delivery: periodic `POST /internal/trusttunnel/metrics` and `POST /internal/telemetry/snapshots`, keyed by `external_node_id`, with optional endpoint Prometheus scraping for active sessions and bandwidth.
 - Lifecycle register payload also includes endpoint metadata derived from `tt-link.toml`: `public_host`, `endpoint_ip`, `port`, `cert_domain`, `custom_sni`. LK uses these fields to keep auto-registered nodes in sync with the actual IP/SNI client contract.
 - Runtime entrypoint ACK logs include `phase=runtime_entrypoint_ack_sent|runtime_entrypoint_ack_accepted`, `entrypoint`, `observed_host`, `observed_port`, `bind_scope`, and `listen_ok`.
+- Access-pair target sync logs include `phase=access_pair_target_sync_empty|access_pair_target_sync_skipped|access_pair_target_ack_accepted`, `target_id`, `pair_id`, `username`, `sync_status`, `target_state`, and `materializer`.
 - Speedtest telemetry can attach `status`, `target_url`, `samples`, `last_result`,
   `rolling_average`, `peak`, and `last_error` to LK telemetry snapshots.
 - Register failures keep a compact `response_preview` instead of dumping raw

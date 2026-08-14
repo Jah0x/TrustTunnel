@@ -2,6 +2,7 @@
 
 ## 1.0.28
 
+- [Feature] `classic_agent` can now opt into LK access-pair target lease polling and ACK delivery, reporting `applied` only after signed-auth keyring readiness or validated registry credential materialization.
 - [Feature] `classic_agent` can now opt into `entrypoint_runtime_ack.v1` delivery, proving the advertised TT host/port is covered by the runtime bind and local TCP listener probe before LK uses it for rescue route actions.
 - [Feature] `classic_agent` can now opt into `route_action_command.v1` polling for `observe_noop`, persist command state, and retry `route_action_ack.v1` delivery from a dedicated ACK outbox without mutating runtime traffic.
 - [Fix] `classic_agent` now restores db-worker heartbeat health to `ok` on clean no-change reconcile passes, so one transient bootstrap retry no longer leaves a healthy node stuck in permanent `degraded` status inside LK.

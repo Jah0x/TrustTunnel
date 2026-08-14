@@ -66,6 +66,8 @@ const DEFAULT_SPEEDTEST_TIMEOUT: Duration = Duration::from_secs(20);
 const DEFAULT_SPEEDTEST_HISTORY_LIMIT: usize = 24;
 const DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL: Duration = Duration::from_secs(30);
 const DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+const DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL: Duration = Duration::from_secs(10);
+const DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS: u64 = 120;
 const INVENTORY_INGEST_ATTEMPTS: usize = 3;
 const INVENTORY_INGEST_INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 const SYNC_REPORT_OUTBOX_FILE: &str = "pending_sync_reports.jsonl";
@@ -76,6 +78,10 @@ const RUNTIME_PRIMARY_MARKER_FILE: &str = ".runtime_credentials_primary";
 const DEFAULT_RUNTIME_VALIDATION_MIN_USERS: usize = 1;
 const DEFAULT_RUNTIME_VALIDATION_MAX_USERS: usize = 100;
 const DEFAULT_ENDPOINT_BINARY_PATH: &str = "/usr/local/bin/trusttunnel_endpoint";
+const DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE: &str =
+    "/internal/trusttunnel/v1/nodes/{externalNodeId}/access-pair-targets";
+const DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE: &str =
+    "/internal/trusttunnel/v1/nodes/{externalNodeId}/access-pair-targets/ack";
 const LINK_GENERATION_STARTED_PHASE: &str = "link_generation_started";
 const LINK_GENERATION_COMPLETE_PHASE: &str = "link_generation_complete";
 const LINK_GENERATION_EXPORTED_PHASE: &str = "link_generation_exported";
@@ -249,6 +255,13 @@ struct Config {
     runtime_entrypoint_ack_interval: Duration,
     runtime_entrypoint_ack_probe_timeout: Duration,
     runtime_entrypoint_id: Option<String>,
+    access_pair_target_sync_enabled: bool,
+    access_pair_target_sync_interval: Duration,
+    access_pair_target_lease_seconds: u64,
+    access_pair_target_runtime_id: String,
+    access_pair_targets_path_template: String,
+    access_pair_target_ack_path_template: String,
+    access_pair_secrets_path: Option<PathBuf>,
     lk_metrics_path: String,
     lk_telemetry_snapshots_path: String,
     endpoint_metrics_url: Option<String>,
@@ -615,6 +628,55 @@ impl Config {
             );
         }
         let runtime_entrypoint_id = optional_env_nonempty("TRUSTTUNNEL_ENTRYPOINT_ID");
+        let access_pair_target_sync_enabled =
+            env_flag_enabled("TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_ENABLED");
+        let access_pair_target_sync_interval =
+            optional_env_nonempty("TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_INTERVAL_SEC")
+                .map(|raw| {
+                    let secs = raw.parse::<u64>().map_err(|e| {
+                        format!(
+                    "TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_INTERVAL_SEC must be u64 seconds: {e}"
+                )
+                    })?;
+                    Ok::<Duration, String>(Duration::from_secs(secs))
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL);
+        if access_pair_target_sync_enabled && access_pair_target_sync_interval.is_zero() {
+            return Err(
+                "TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_INTERVAL_SEC must be greater than zero"
+                    .to_string(),
+            );
+        }
+        let access_pair_target_lease_seconds =
+            optional_env_nonempty("TRUSTTUNNEL_ACCESS_PAIR_TARGET_LEASE_SEC")
+                .map(|raw| {
+                    raw.parse::<u64>().map_err(|e| {
+                        format!("TRUSTTUNNEL_ACCESS_PAIR_TARGET_LEASE_SEC must be u64 seconds: {e}")
+                    })
+                })
+                .transpose()?
+                .unwrap_or(DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS)
+                .min(600);
+        if access_pair_target_sync_enabled && access_pair_target_lease_seconds == 0 {
+            return Err(
+                "TRUSTTUNNEL_ACCESS_PAIR_TARGET_LEASE_SEC must be greater than zero".to_string(),
+            );
+        }
+        let access_pair_target_runtime_id =
+            optional_env_nonempty("TRUSTTUNNEL_ACCESS_PAIR_TARGET_RUNTIME_ID")
+                .or_else(|| optional_env_nonempty("TRUSTTUNNEL_RUNTIME_ID"))
+                .unwrap_or_else(|| node_external_id.clone());
+        let access_pair_targets_path_template =
+            optional_env_nonempty("LK_ACCESS_PAIR_TARGETS_PATH_TEMPLATE")
+                .unwrap_or_else(|| DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE.to_string());
+        let access_pair_target_ack_path_template =
+            optional_env_nonempty("LK_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE")
+                .unwrap_or_else(|| DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE.to_string());
+        let access_pair_secrets_path =
+            optional_env_nonempty("TRUSTTUNNEL_ACCESS_PAIR_SECRETS_FILE")
+                .map(PathBuf::from)
+                .map(|path| resolve_runtime_path(&trusttunnel_runtime_dir, &path));
         let debug_preserve_temp_files = optional_env_nonempty("TRUSTTUNNEL_DEBUG_KEEP_TEMP_FILES")
             .map(|raw| {
                 matches!(
@@ -722,6 +784,13 @@ impl Config {
             runtime_entrypoint_ack_interval,
             runtime_entrypoint_ack_probe_timeout,
             runtime_entrypoint_id,
+            access_pair_target_sync_enabled,
+            access_pair_target_sync_interval,
+            access_pair_target_lease_seconds,
+            access_pair_target_runtime_id,
+            access_pair_targets_path_template,
+            access_pair_target_ack_path_template,
+            access_pair_secrets_path,
             lk_metrics_path,
             lk_telemetry_snapshots_path,
             endpoint_metrics_url,
@@ -839,6 +908,14 @@ impl Config {
                 "TRUSTTUNNEL_LINK_CONFIG_FILE parent path not found: {}",
                 link_config_parent.display()
             ));
+        }
+        if let Some(secrets_path) = self.access_pair_secrets_path.as_ref() {
+            if !secrets_path.exists() {
+                return Err(format!(
+                    "TRUSTTUNNEL_ACCESS_PAIR_SECRETS_FILE path not found: {}",
+                    secrets_path.display()
+                ));
+            }
         }
         Ok(())
     }
@@ -1165,6 +1242,58 @@ struct InventoryIngestAttempt {
     had_retry: bool,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct AccessPairTargetsEnvelope {
+    contract_version: String,
+    external_node_id: String,
+    #[serde(default)]
+    targets: Vec<AccessPairTarget>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct AccessPairTarget {
+    target_id: u64,
+    pair_id: String,
+    username: String,
+    target_state: String,
+    sync_status: String,
+    auth_mode: String,
+    #[serde(default)]
+    lease_id: Option<String>,
+    #[serde(default)]
+    desired_revision: u64,
+    #[serde(default)]
+    applied_revision: u64,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct AccessPairTargetAckPayload {
+    contract_version: &'static str,
+    target_id: u64,
+    pair_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lease_id: Option<String>,
+    idempotency_key: String,
+    target_state: String,
+    sync_status: String,
+    auth_mode: String,
+    runtime_revision: String,
+    sidecar_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    metadata: serde_json::Value,
+    acked_at: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AccessPairTargetApplyOutcome {
+    sync_status: &'static str,
+    target_state: &'static str,
+    materializer: &'static str,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InventoryIngestSource {
     Bootstrap,
@@ -1429,6 +1558,8 @@ impl Agent {
         speedtest_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut runtime_entrypoint_ack_tick = interval(self.cfg.runtime_entrypoint_ack_interval);
         runtime_entrypoint_ack_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+        let mut access_pair_target_sync_tick = interval(self.cfg.access_pair_target_sync_interval);
+        access_pair_target_sync_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut route_action_tick = interval(self.route_actions.poll_interval);
         route_action_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         let mut backoff = Duration::from_secs(1);
@@ -1455,6 +1586,10 @@ impl Agent {
                 }
                 _ = runtime_entrypoint_ack_tick.tick(), if self.cfg.runtime_entrypoint_ack_enabled => {
                     self.push_runtime_entrypoint_ack().await;
+                    continue;
+                }
+                _ = access_pair_target_sync_tick.tick(), if self.cfg.access_pair_target_sync_enabled => {
+                    self.access_pair_target_sync_tick().await;
                     continue;
                 }
                 _ = route_action_tick.tick(), if self.route_actions.enabled => {
@@ -2758,6 +2893,393 @@ impl Agent {
                 Ok(None)
             }
         }
+    }
+
+    async fn access_pair_target_sync_tick(&mut self) {
+        match self.fetch_access_pair_targets().await {
+            Ok(targets) => {
+                if targets.is_empty() {
+                    println!(
+                        "phase=access_pair_target_sync_empty node={} runtime_id={}",
+                        self.cfg.node_external_id, self.cfg.access_pair_target_runtime_id
+                    );
+                    return;
+                }
+                for target in targets {
+                    if let Err(err) = self.handle_access_pair_target(target).await {
+                        log_error(
+                            self.state.applied_revision.as_deref().unwrap_or("none"),
+                            &self.cfg.node_external_id,
+                            "access_pair_target_sync_failed",
+                            "failed",
+                            &err,
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                log_error(
+                    self.state.applied_revision.as_deref().unwrap_or("none"),
+                    &self.cfg.node_external_id,
+                    "access_pair_target_poll_failed",
+                    "failed",
+                    &err,
+                );
+            }
+        }
+    }
+
+    async fn fetch_access_pair_targets(&self) -> Result<Vec<AccessPairTarget>, String> {
+        let endpoint = self.access_pair_endpoint(&self.cfg.access_pair_targets_path_template)?;
+        let lease_sec = self.cfg.access_pair_target_lease_seconds.to_string();
+        let token = self.required_lk_service_token()?;
+        let response = self
+            .http_client
+            .get(&endpoint)
+            .query(&[
+                (
+                    "runtime_id",
+                    self.cfg.access_pair_target_runtime_id.as_str(),
+                ),
+                ("lease_sec", lease_sec.as_str()),
+            ])
+            .bearer_auth(token)
+            .header("X-Internal-Agent-Token", token)
+            .send()
+            .await
+            .map_err(|e| format!("access pair target poll failed: {e}"))?;
+        if response.status() == StatusCode::NO_CONTENT {
+            return Ok(Vec::new());
+        }
+        if !response.status().is_success() {
+            return Err(format!(
+                "access pair target poll returned HTTP {}",
+                response.status()
+            ));
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|e| format!("failed to read access pair target response: {e}"))?;
+        let envelope = serde_json::from_slice::<AccessPairTargetsEnvelope>(&bytes)
+            .map_err(|e| format!("failed to parse access pair target JSON: {e}"))?;
+        if envelope.contract_version != "access_pair_targets.v1" {
+            return Err(format!(
+                "access pair target contract mismatch: expected access_pair_targets.v1, got {}",
+                envelope.contract_version
+            ));
+        }
+        if envelope.external_node_id != self.cfg.node_external_id {
+            return Err(format!(
+                "access pair target node mismatch: expected {}, got {}",
+                self.cfg.node_external_id, envelope.external_node_id
+            ));
+        }
+        Ok(envelope.targets)
+    }
+
+    async fn handle_access_pair_target(&mut self, target: AccessPairTarget) -> Result<(), String> {
+        if target.target_state == "applied" && target.applied_revision >= target.desired_revision {
+            println!(
+                "phase=access_pair_target_sync_skipped node={} target_id={} pair_id={} username={} reason=already_applied desired_revision={} applied_revision={}",
+                self.cfg.node_external_id,
+                target.target_id,
+                target.pair_id,
+                target.username,
+                target.desired_revision,
+                target.applied_revision
+            );
+            return Ok(());
+        }
+
+        let result = if target.target_state == "revoke_desired" {
+            self.apply_registry_access_pair_target(&target, None).await
+        } else if target.auth_mode == "lk_signed" {
+            self.ensure_lk_signed_access_ready(&target).await
+        } else {
+            let secret = self.lookup_access_pair_secret(&target.username).await?;
+            self.apply_registry_access_pair_target(&target, secret)
+                .await
+        };
+
+        match result {
+            Ok(outcome) => {
+                self.send_access_pair_target_ack(&target, outcome, None)
+                    .await?;
+            }
+            Err(err) => {
+                self.send_access_pair_target_ack(
+                    &target,
+                    AccessPairTargetApplyOutcome {
+                        sync_status: "error",
+                        target_state: "failed",
+                        materializer: "none",
+                    },
+                    Some(err.clone()),
+                )
+                .await?;
+                return Err(err);
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_lk_signed_access_ready(
+        &self,
+        target: &AccessPairTarget,
+    ) -> Result<AccessPairTargetApplyOutcome, String> {
+        let settings_path = self.resolve_runtime_path(&self.cfg.trusttunnel_config_file);
+        let raw = fs::read_to_string(&settings_path).await.map_err(|e| {
+            format!(
+                "failed to read runtime settings for signed access target {}: {e}",
+                settings_path.display()
+            )
+        })?;
+        let doc = raw.parse::<toml_edit::Document>().map_err(|e| {
+            format!(
+                "failed to parse runtime settings for signed access target {}: {e}",
+                settings_path.display()
+            )
+        })?;
+        let signed = doc
+            .get("lk_signed_auth")
+            .and_then(toml_edit::Item::as_table);
+        let enabled = signed
+            .and_then(|table| table.get("enabled"))
+            .and_then(toml_edit::Item::as_bool)
+            .unwrap_or(false);
+        let has_key = signed
+            .and_then(|table| table.get("keys"))
+            .and_then(toml_edit::Item::as_array_of_tables)
+            .map(|keys| {
+                keys.iter().any(|key| {
+                    key.get("key_id")
+                        .and_then(toml_edit::Item::as_str)
+                        .map(str::trim)
+                        .filter(|item| !item.is_empty())
+                        .is_some()
+                        && key
+                            .get("secret")
+                            .and_then(toml_edit::Item::as_str)
+                            .map(str::trim)
+                            .filter(|item| !item.is_empty())
+                            .is_some()
+                })
+            })
+            .unwrap_or(false);
+        if !enabled || !has_key {
+            return Err(format!(
+                "lk_signed auth target {} cannot be applied: runtime config has enabled={} keyring_ready={}",
+                target.target_id, enabled, has_key
+            ));
+        }
+        Ok(AccessPairTargetApplyOutcome {
+            sync_status: "applied",
+            target_state: "applied",
+            materializer: "lk_signed_keyring",
+        })
+    }
+
+    async fn lookup_access_pair_secret(
+        &self,
+        username: &str,
+    ) -> Result<Option<sidecar_sync::AccessArtifact>, String> {
+        let mut sources = Vec::new();
+        if let Some(path) = self.cfg.access_pair_secrets_path.as_ref() {
+            sources.push(path.clone());
+        }
+        sources.push(self.cfg.runtime_credentials_path.clone());
+
+        for path in sources {
+            if !fs::try_exists(&path).await.map_err(|e| {
+                format!(
+                    "failed to check access pair secret source {}: {e}",
+                    path.display()
+                )
+            })? {
+                continue;
+            }
+            let raw = fs::read_to_string(&path).await.map_err(|e| {
+                format!(
+                    "failed to read access pair secret source {}: {e}",
+                    path.display()
+                )
+            })?;
+            if raw.trim().is_empty() {
+                continue;
+            }
+            let artifacts = parse_access_artifacts(&raw)?;
+            if let Some(found) = artifacts.into_iter().find(|item| item.username == username) {
+                return Ok(Some(found));
+            }
+        }
+
+        Ok(None)
+    }
+
+    async fn apply_registry_access_pair_target(
+        &mut self,
+        target: &AccessPairTarget,
+        secret: Option<sidecar_sync::AccessArtifact>,
+    ) -> Result<AccessPairTargetApplyOutcome, String> {
+        let mut desired = self.load_runtime_credentials_artifacts().await?;
+        desired.retain(|item| item.username != target.username);
+        if target.target_state != "revoke_desired" {
+            let secret = secret.ok_or_else(|| {
+                format!(
+                    "local_access_pair_secret_missing target_id={} pair_id={} username={}",
+                    target.target_id, target.pair_id, target.username
+                )
+            })?;
+            desired.push(secret);
+        }
+        desired.sort_by(|a, b| a.username.cmp(&b.username));
+        let rendered = render_access_artifacts(&desired);
+        let rendered_sha = sha256_hex(rendered.as_bytes());
+        if self.state.credentials_sha256 == rendered_sha
+            && fs::try_exists(&self.cfg.runtime_credentials_path)
+                .await
+                .unwrap_or(false)
+        {
+            return Ok(AccessPairTargetApplyOutcome {
+                sync_status: "applied",
+                target_state: if target.target_state == "revoke_desired" {
+                    "revoked"
+                } else {
+                    "applied"
+                },
+                materializer: "registry_credentials_noop",
+            });
+        }
+
+        let previous_runtime_credentials = fs::read(&self.cfg.runtime_credentials_path).await.ok();
+        let tmp_credentials_path = self
+            .write_runtime_credentials_tmp(rendered.as_bytes())
+            .await?;
+        let validation_files = self
+            .validate_candidate_credentials_pipeline(tmp_credentials_path)
+            .await?;
+        self.cleanup_validation_files(&validation_files, self.cfg.debug_preserve_temp_files, false)
+            .await?;
+        self.promote_runtime_credentials(&validation_files.candidate_credentials_path)
+            .await?;
+        let apply_result = self.apply_runtime().await;
+        let apply_result = match apply_result {
+            Ok(()) => self.verify_runtime_post_apply(&rendered_sha).await,
+            Err(err) => Err(err),
+        };
+        if let Err(apply_err) = apply_result {
+            let rollback_result = self.rollback_runtime(previous_runtime_credentials).await;
+            return match rollback_result {
+                Ok(()) => Err(format!(
+                    "access pair target apply failed and rollback completed: {apply_err}"
+                )),
+                Err(rollback_err) => Err(format!(
+                    "access pair target apply failed: {apply_err}; rollback failed: {rollback_err}"
+                )),
+            };
+        }
+        self.state.credentials_sha256 = rendered_sha;
+        self.mark_runtime_as_primary().await?;
+        persist_state(&self.cfg.agent_state_path, &self.state).await?;
+
+        Ok(AccessPairTargetApplyOutcome {
+            sync_status: "applied",
+            target_state: if target.target_state == "revoke_desired" {
+                "revoked"
+            } else {
+                "applied"
+            },
+            materializer: "registry_credentials",
+        })
+    }
+
+    async fn send_access_pair_target_ack(
+        &self,
+        target: &AccessPairTarget,
+        outcome: AccessPairTargetApplyOutcome,
+        last_error: Option<String>,
+    ) -> Result<(), String> {
+        let endpoint = self.access_pair_endpoint(&self.cfg.access_pair_target_ack_path_template)?;
+        let token = self.required_lk_service_token()?;
+        let payload = AccessPairTargetAckPayload {
+            contract_version: "access_pair_target_ack.v1",
+            target_id: target.target_id,
+            pair_id: target.pair_id.clone(),
+            lease_id: target.lease_id.clone(),
+            idempotency_key: target.idempotency_key.clone().unwrap_or_else(|| {
+                format!(
+                    "access-pair-target-{}-{}-{}",
+                    target.target_id, target.desired_revision, outcome.sync_status
+                )
+            }),
+            target_state: outcome.target_state.to_string(),
+            sync_status: outcome.sync_status.to_string(),
+            auth_mode: target.auth_mode.clone(),
+            runtime_revision: self
+                .state
+                .applied_revision
+                .clone()
+                .unwrap_or_else(|| self.state.credentials_sha256.clone()),
+            sidecar_version: self.cfg.agent_version.clone(),
+            last_error,
+            metadata: serde_json::json!({
+                "runtime_id": self.cfg.access_pair_target_runtime_id,
+                "materializer": outcome.materializer,
+                "target_sync_status_before": target.sync_status,
+                "desired_revision": target.desired_revision,
+                "applied_revision_before": target.applied_revision,
+            }),
+            acked_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let response = self
+            .http_client
+            .post(endpoint)
+            .bearer_auth(token)
+            .header("X-Internal-Agent-Token", token)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("access pair target ACK failed: {e}"))?;
+        if response.status().is_success() {
+            println!(
+                "phase=access_pair_target_ack_accepted node={} target_id={} pair_id={} username={} sync_status={} target_state={} materializer={}",
+                self.cfg.node_external_id,
+                target.target_id,
+                target.pair_id,
+                target.username,
+                outcome.sync_status,
+                outcome.target_state,
+                outcome.materializer
+            );
+            return Ok(());
+        }
+        Err(format!(
+            "access pair target ACK returned HTTP {} for target_id={}",
+            response.status(),
+            target.target_id
+        ))
+    }
+
+    fn access_pair_endpoint(&self, template: &str) -> Result<String, String> {
+        let base_url = self
+            .cfg
+            .lk_base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| "access pair target sync requires LK lifecycle base URL".to_string())?;
+        let path = template.replace("{externalNodeId}", &self.cfg.node_external_id);
+        Ok(format!("{}{}", base_url.trim_end_matches('/'), path))
+    }
+
+    fn required_lk_service_token(&self) -> Result<&str, String> {
+        self.cfg
+            .lk_service_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| "LK_SERVICE_TOKEN is required for access pair target sync".to_string())
     }
 
     async fn batch_tt_link_reconcile(
@@ -5801,6 +6323,16 @@ fn render_credentials(accounts: &[&Account]) -> String {
     out
 }
 
+fn render_access_artifacts(accounts: &[sidecar_sync::AccessArtifact]) -> String {
+    let mut out = String::new();
+    for item in accounts {
+        out.push_str("[[client]]\n");
+        out.push_str(&format!("username = {:?}\n", item.username));
+        out.push_str(&format!("password = {:?}\n\n", item.password));
+    }
+    out
+}
+
 fn parse_access_artifacts(raw: &str) -> Result<Vec<sidecar_sync::AccessArtifact>, String> {
     let parsed = parse_client_credentials(raw, "credentials")?;
     Ok(parsed
@@ -7314,6 +7846,27 @@ mod tests {
     }
 
     #[cfg(feature = "legacy-lk-http")]
+    fn access_pair_targets_json(auth_mode: &str) -> String {
+        serde_json::json!({
+            "contract_version": "access_pair_targets.v1",
+            "external_node_id": "node-1",
+            "targets": [{
+                "target_id": 101,
+                "pair_id": "tt-pair-101",
+                "username": "access-101",
+                "target_state": "desired",
+                "sync_status": "syncing",
+                "auth_mode": auth_mode,
+                "lease_id": "lease-101",
+                "desired_revision": 7,
+                "applied_revision": 0,
+                "idempotency_key": "target-101-rev-7"
+            }]
+        })
+        .to_string()
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
     async fn make_agent(temp_dir: &TempDir, base_url: &str, apply_cmd: Option<&str>) -> Agent {
         let runtime_dir = temp_dir.path().join("runtime");
         fs::create_dir_all(&runtime_dir).await.unwrap();
@@ -7433,6 +7986,15 @@ message_queue_capacity = 4096
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: None,
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -7502,6 +8064,15 @@ message_queue_capacity = 4096
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: entrypoint_id.map(ToString::to_string),
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -7635,6 +8206,15 @@ upload_buffer_size = 32768
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: None,
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -7901,6 +8481,15 @@ upload_buffer_size = 32768
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: None,
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -8019,6 +8608,15 @@ upload_buffer_size = 32768
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: None,
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -8121,6 +8719,15 @@ upload_buffer_size = 32768
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: None,
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -8336,6 +8943,15 @@ upload_buffer_size = 32768
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: None,
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -8423,6 +9039,125 @@ upload_buffer_size = 32768
             .unwrap();
         assert_eq!(loaded, vec![ack]);
         assert!(!fs::try_exists(&sync_report_path).await.unwrap());
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    #[tokio::test]
+    async fn access_pair_target_sync_acks_lk_signed_keyring_ready() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+        fs::write(
+            &agent.cfg.trusttunnel_config_file,
+            format!(
+                r#"
+listen_address = "127.0.0.1:443"
+credentials_file = "{}"
+rules_file = "{}"
+
+[listen_protocols]
+
+[listen_protocols.http2]
+initial_connection_window_size = 8388608
+initial_stream_window_size = 131072
+max_concurrent_streams = 1000
+max_frame_size = 16384
+header_table_size = 65536
+
+[lk_signed_auth]
+enabled = true
+mode = "signed_only"
+
+[[lk_signed_auth.keys]]
+key_id = "lk-key-a"
+secret = "test-secret"
+"#,
+                agent.cfg.runtime_credentials_path.display(),
+                agent
+                    .resolve_runtime_path(&agent.cfg.trusttunnel_runtime_dir.join("rules.toml"))
+                    .display()
+            ),
+        )
+        .await
+        .unwrap();
+        server
+            .enqueue(
+                Method::GET,
+                "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets",
+                HyperStatusCode::OK,
+                access_pair_targets_json("lk_signed"),
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets/ack",
+                HyperStatusCode::OK,
+                "{}",
+            )
+            .await;
+
+        agent.access_pair_target_sync_tick().await;
+
+        let requests = server.captured().await;
+        let ack = requests
+            .iter()
+            .find(|request| {
+                request.method == Method::POST
+                    && request.path
+                        == "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets/ack"
+            })
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .unwrap();
+        assert_eq!(ack["contract_version"], "access_pair_target_ack.v1");
+        assert_eq!(ack["target_id"], 101);
+        assert_eq!(ack["sync_status"], "applied");
+        assert_eq!(ack["target_state"], "applied");
+        assert_eq!(ack["metadata"]["materializer"], "lk_signed_keyring");
+        assert!(ack.get("last_error").is_none());
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    #[tokio::test]
+    async fn access_pair_target_sync_reports_missing_registry_secret_as_error() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+        server
+            .enqueue(
+                Method::GET,
+                "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets",
+                HyperStatusCode::OK,
+                access_pair_targets_json("registry_credentials"),
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets/ack",
+                HyperStatusCode::OK,
+                "{}",
+            )
+            .await;
+
+        agent.access_pair_target_sync_tick().await;
+
+        let requests = server.captured().await;
+        let ack = requests
+            .iter()
+            .find(|request| {
+                request.method == Method::POST
+                    && request.path
+                        == "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets/ack"
+            })
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .unwrap();
+        assert_eq!(ack["sync_status"], "error");
+        assert_eq!(ack["target_state"], "failed");
+        assert!(ack["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("local_access_pair_secret_missing"));
     }
 
     #[cfg(feature = "legacy-lk-http")]
@@ -9127,6 +9862,15 @@ upload_buffer_size = 32768
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: None,
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
@@ -10456,6 +11200,15 @@ upload_buffer_size = 32768
             runtime_entrypoint_ack_interval: DEFAULT_RUNTIME_ENTRYPOINT_ACK_INTERVAL,
             runtime_entrypoint_ack_probe_timeout: DEFAULT_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT,
             runtime_entrypoint_id: None,
+            access_pair_target_sync_enabled: false,
+            access_pair_target_sync_interval: DEFAULT_ACCESS_PAIR_TARGET_SYNC_INTERVAL,
+            access_pair_target_lease_seconds: DEFAULT_ACCESS_PAIR_TARGET_LEASE_SECONDS,
+            access_pair_target_runtime_id: "node-1".to_string(),
+            access_pair_targets_path_template: DEFAULT_ACCESS_PAIR_TARGETS_PATH_TEMPLATE
+                .to_string(),
+            access_pair_target_ack_path_template: DEFAULT_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE
+                .to_string(),
+            access_pair_secrets_path: None,
             lk_metrics_path: DEFAULT_NODE_METRICS_PATH.to_string(),
             lk_telemetry_snapshots_path: DEFAULT_TELEMETRY_SNAPSHOTS_PATH.to_string(),
             endpoint_metrics_url: None,
