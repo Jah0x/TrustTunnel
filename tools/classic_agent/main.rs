@@ -9323,7 +9323,8 @@ secret = "test-secret"
         let tmp_dir = TempDir::new().unwrap();
         let hook_marker_path = tmp_dir.path().join("drain-hook-ran");
         let hook_cmd = format!("printf ok > {}", hook_marker_path.display());
-        let mut agent = make_agent(&tmp_dir, &server.base_url, Some(&hook_cmd)).await;
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+        agent.route_actions.drain_cmd = Some(hook_cmd);
         let command_body = route_action_commands_json("cmd-drain-hook-1", "apply_drain", None);
         server
             .enqueue(
