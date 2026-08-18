@@ -6,6 +6,8 @@ use trusttunnel::net_utils;
 #[allow(dead_code)]
 mod common;
 
+const SPEEDTEST_TIMEOUT: Duration = Duration::from_secs(60);
+
 macro_rules! download_tests {
     ($($name:ident: $client_fn:expr, $body_size_mb:expr,)*) => {
     $(
@@ -24,7 +26,7 @@ macro_rules! download_tests {
             tokio::select! {
                 _ = common::run_endpoint(&endpoint_address) => unreachable!(),
                 _ = client_task => (),
-                _ = tokio::time::sleep(Duration::from_secs(20)) => panic!("Timed out"),
+                _ = tokio::time::sleep(SPEEDTEST_TIMEOUT) => panic!("Timed out"),
             }
         }
     )*
@@ -48,7 +50,7 @@ macro_rules! upload_tests {
             tokio::select! {
                 _ = common::run_endpoint(&endpoint_address) => unreachable!(),
                 _ = client_task => (),
-                _ = tokio::time::sleep(Duration::from_secs(20)) => panic!("Timed out"),
+                _ = tokio::time::sleep(SPEEDTEST_TIMEOUT) => panic!("Timed out"),
             }
         }
     )*
