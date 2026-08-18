@@ -112,3 +112,7 @@ test: test-rust
 
 test-rust:
 	cargo test --workspace
+
+.PHONY: test-classic-agent-legacy-lk-http
+test-classic-agent-legacy-lk-http:
+	cargo test -p trusttunnel_endpoint_tools --features legacy-lk-http route_action

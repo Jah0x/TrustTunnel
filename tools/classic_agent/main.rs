@@ -3534,63 +3534,79 @@ impl Agent {
         )
         .await?;
 
-        if let Some(cmd) = &self.route_actions.drain_cmd {
-            let status = Command::new("sh")
-                .arg("-c")
-                .arg(cmd)
-                .env("ROUTE_ACTION_COMMAND_ID", &command.command_id)
-                .env("ROUTE_ACTION_DECISION_ID", &command.decision_id)
-                .env(
-                    "ROUTE_ACTION_LEASE_ID",
-                    command.lease_id.as_deref().unwrap_or(""),
-                )
-                .env("ROUTE_ACTION_RUNTIME_ID", &self.cfg.node_external_id)
-                .env(
-                    "ROUTE_ACTION_REASON_CODE",
-                    command.reason_code.as_deref().unwrap_or(""),
-                )
-                .env(
-                    "ROUTE_ACTION_TARGET_ENTRYPOINT_ID",
-                    command.target_entrypoint_id.as_deref().unwrap_or(""),
-                )
-                .env(
-                    "ROUTE_ACTION_TARGET_CONTOUR_ID",
-                    command.target_contour_id.as_deref().unwrap_or(""),
-                )
-                .status()
-                .await
-                .map_err(|e| {
-                    format!("failed to execute TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD: {e}")
-                })?;
+        let Some(cmd) = &self.route_actions.drain_cmd else {
+            self.enqueue_route_action_ack(
+                command,
+                "skipped",
+                Some("drain_hook_not_configured"),
+                Some(serde_json::json!({
+                    "drain_marker_path": self.route_actions.drain_marker_path,
+                    "drain_hook_configured": false
+                })),
+            )
+            .await?;
+            self.persist_route_action_command(
+                command,
+                "skipped",
+                Some("drain_hook_not_configured"),
+            )
+            .await?;
+            return Ok(());
+        };
 
-            if !status.success() {
-                self.enqueue_route_action_ack(
-                    command,
-                    "failed",
-                    Some("drain_hook_failed"),
-                    Some(serde_json::json!({
-                        "drain_marker_path": self.route_actions.drain_marker_path,
-                        "exit_status": status.to_string()
-                    })),
-                )
+        let status = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .env("ROUTE_ACTION_COMMAND_ID", &command.command_id)
+            .env("ROUTE_ACTION_DECISION_ID", &command.decision_id)
+            .env(
+                "ROUTE_ACTION_LEASE_ID",
+                command.lease_id.as_deref().unwrap_or(""),
+            )
+            .env("ROUTE_ACTION_RUNTIME_ID", &self.cfg.node_external_id)
+            .env(
+                "ROUTE_ACTION_REASON_CODE",
+                command.reason_code.as_deref().unwrap_or(""),
+            )
+            .env(
+                "ROUTE_ACTION_TARGET_ENTRYPOINT_ID",
+                command.target_entrypoint_id.as_deref().unwrap_or(""),
+            )
+            .env(
+                "ROUTE_ACTION_TARGET_CONTOUR_ID",
+                command.target_contour_id.as_deref().unwrap_or(""),
+            )
+            .status()
+            .await
+            .map_err(|e| format!("failed to execute TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD: {e}"))?;
+
+        if !status.success() {
+            self.enqueue_route_action_ack(
+                command,
+                "failed",
+                Some("drain_hook_failed"),
+                Some(serde_json::json!({
+                    "drain_marker_path": self.route_actions.drain_marker_path,
+                    "exit_status": status.to_string()
+                })),
+            )
+            .await?;
+            self.persist_route_action_command(command, "failed", Some("drain_hook_failed"))
                 .await?;
-                self.persist_route_action_command(command, "failed", Some("drain_hook_failed"))
-                    .await?;
-                return Ok(());
-            }
+            return Ok(());
         }
 
         self.enqueue_route_action_ack(
             command,
             "applied",
-            Some("apply_drain_marker_written"),
+            Some("drain_hook_succeeded"),
             Some(serde_json::json!({
                 "drain_marker_path": self.route_actions.drain_marker_path,
-                "drain_hook_configured": self.route_actions.drain_cmd.is_some()
+                "drain_hook_configured": true
             })),
         )
         .await?;
-        self.persist_route_action_command(command, "applied", Some("apply_drain_marker_written"))
+        self.persist_route_action_command(command, "applied", Some("drain_hook_succeeded"))
             .await
     }
 
@@ -9229,7 +9245,7 @@ secret = "test-secret"
 
     #[cfg(feature = "legacy-lk-http")]
     #[tokio::test]
-    async fn route_action_apply_drain_writes_marker_and_flushes_applied_ack() {
+    async fn route_action_apply_drain_without_hook_writes_marker_and_skips_applied_ack() {
         let server = MockHttpServer::start().await;
         let tmp_dir = TempDir::new().unwrap();
         let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
@@ -9267,10 +9283,10 @@ secret = "test-secret"
             .commands
             .get("cmd-drain-1")
             .unwrap();
-        assert_eq!(stored.last_status, "applied");
+        assert_eq!(stored.last_status, "skipped");
         assert_eq!(
             stored.status_reason_code.as_deref(),
-            Some("apply_drain_marker_written")
+            Some("drain_hook_not_configured")
         );
 
         let marker_bytes = fs::read(&agent.route_actions.drain_marker_path)
@@ -9292,11 +9308,77 @@ secret = "test-secret"
             .collect::<Vec<_>>();
         assert_eq!(ack_bodies.len(), 2);
         assert_eq!(ack_bodies[0]["status"], "received");
-        assert_eq!(ack_bodies[1]["status"], "applied");
+        assert_eq!(ack_bodies[1]["status"], "skipped");
         assert_eq!(
             ack_bodies[1]["status_reason_code"],
-            "apply_drain_marker_written"
+            "drain_hook_not_configured"
         );
+        assert_eq!(ack_bodies[1]["evidence"]["drain_hook_configured"], false);
+    }
+
+    #[cfg(all(feature = "legacy-lk-http", unix))]
+    #[tokio::test]
+    async fn route_action_apply_drain_with_successful_hook_flushes_applied_ack() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let hook_marker_path = tmp_dir.path().join("drain-hook-ran");
+        let hook_cmd = format!("printf ok > {}", hook_marker_path.display());
+        let mut agent = make_agent(&tmp_dir, &server.base_url, Some(&hook_cmd)).await;
+        let command_body = route_action_commands_json("cmd-drain-hook-1", "apply_drain", None);
+        server
+            .enqueue(
+                Method::GET,
+                "/internal/trusttunnel/v1/nodes/node-1/route-actions/commands",
+                HyperStatusCode::OK,
+                command_body,
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/route-actions/acks",
+                HyperStatusCode::OK,
+                "",
+            )
+            .await;
+
+        agent.route_action_tick().await;
+
+        let stored = agent
+            .route_actions
+            .state
+            .commands
+            .get("cmd-drain-hook-1")
+            .unwrap();
+        assert_eq!(stored.last_status, "applied");
+        assert_eq!(
+            stored.status_reason_code.as_deref(),
+            Some("drain_hook_succeeded")
+        );
+        assert_eq!(fs::read_to_string(&hook_marker_path).await.unwrap(), "ok");
+
+        let requests = server.captured().await;
+        let ack_bodies = requests
+            .iter()
+            .filter(|request| {
+                request.method == Method::POST
+                    && request.path == "/internal/trusttunnel/v1/nodes/route-actions/acks"
+            })
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(ack_bodies.len(), 2);
+        assert_eq!(ack_bodies[0]["status"], "received");
+        assert_eq!(ack_bodies[1]["status"], "applied");
+        assert_eq!(ack_bodies[1]["status_reason_code"], "drain_hook_succeeded");
+        assert_eq!(ack_bodies[1]["evidence"]["drain_hook_configured"], true);
     }
 
     #[cfg(feature = "legacy-lk-http")]

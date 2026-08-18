@@ -40,6 +40,10 @@ jobs:
         run: |
           cargo test --workspace
 
+      - name: Run classic agent legacy LK HTTP route action tests
+        run: |
+          make test-classic-agent-legacy-lk-http
+
       - name: Lint Rust
         run: |
           make lint-rust

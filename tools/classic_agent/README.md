@@ -153,6 +153,8 @@ Optional:
 - `TRUSTTUNNEL_ROUTE_ACTION_POLL_INTERVAL_SEC` (default `5`)
 - `TRUSTTUNNEL_ROUTE_ACTION_STATE_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/route_action_state.json`)
 - `TRUSTTUNNEL_ROUTE_ACTION_ACK_OUTBOX_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/pending_route_action_acks.jsonl`)
+- `TRUSTTUNNEL_ROUTE_ACTION_DRAIN_MARKER_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/route_action_drain_marker.json`)
+- `TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD` (optional shell command run for `apply_drain`; only successful hooks are ACKed as `applied`)
 - `LK_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/route-actions/commands`)
 - `LK_ROUTE_ACTION_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/route-actions/acks`)
 - `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_ENABLED` (default `false`; sends LK proof that the advertised entrypoint is actually covered by the runtime bind and local TCP probe)
@@ -201,11 +203,15 @@ Optional:
 
 Route action polling is opt-in. With `TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED=true`,
 `classic_agent` accepts only `route_action_command.v1` commands with
-`action=observe_noop`, writes processed command state to
-`route_action_state.json`, and retries `route_action_ack.v1` rows from
+`action=observe_noop` or `action=apply_drain`, writes processed command state
+to `route_action_state.json`, and retries `route_action_ack.v1` rows from
 `pending_route_action_acks.jsonl` until LK accepts them. Unknown actions are
-ACKed as `skipped`; expired commands are ACKed as `expired`. The sidecar does
-not drain, quarantine, reweight, or otherwise mutate runtime traffic.
+ACKed as `skipped`; expired commands are ACKed as `expired`.
+`apply_drain` writes a local drain marker. It is ACKed as `applied` only after
+`TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD` is configured and exits successfully; if
+the hook is absent, the command is ACKed as `skipped` with
+`drain_hook_not_configured`. The sidecar does not quarantine, reweight, or
+otherwise mutate runtime traffic without an operator-provided hook.
 
 Runtime entrypoint ACK is opt-in. With
 `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_ENABLED=true`, `classic_agent` reads
