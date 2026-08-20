@@ -12,6 +12,8 @@ pub const DEFAULT_TELEMETRY_SNAPSHOTS_PATH: &str = "/internal/telemetry/snapshot
 pub const DEFAULT_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE: &str =
     "/internal/trusttunnel/v1/nodes/{externalNodeId}/route-actions/commands";
 pub const DEFAULT_ROUTE_ACTION_ACK_PATH: &str = "/internal/trusttunnel/v1/nodes/route-actions/acks";
+pub const DEFAULT_RUNTIME_ENTRYPOINT_ACK_PATH: &str =
+    "/internal/trusttunnel/v1/nodes/runtime-entrypoint-acks";
 
 #[derive(Clone)]
 pub struct LkApiClient {
@@ -26,6 +28,7 @@ pub struct LkApiClient {
     telemetry_snapshots_path: String,
     route_action_commands_path_template: String,
     route_action_ack_path: String,
+    runtime_entrypoint_ack_path: String,
 }
 
 impl LkApiClient {
@@ -42,6 +45,7 @@ impl LkApiClient {
         telemetry_snapshots_path: String,
         route_action_commands_path_template: String,
         route_action_ack_path: String,
+        runtime_entrypoint_ack_path: String,
     ) -> Self {
         Self {
             client,
@@ -55,6 +59,7 @@ impl LkApiClient {
             telemetry_snapshots_path,
             route_action_commands_path_template,
             route_action_ack_path,
+            runtime_entrypoint_ack_path,
         }
     }
 
@@ -284,6 +289,30 @@ impl LkApiClient {
         ))
     }
 
+    pub async fn push_runtime_entrypoint_ack(
+        &self,
+        payload: &RuntimeEntrypointAckPayload<'_>,
+    ) -> Result<(), String> {
+        let response = self
+            .client
+            .post(self.endpoint(&self.runtime_entrypoint_ack_path))
+            .header("Authorization", format!("Bearer {}", self.service_token))
+            .header("X-Internal-Agent-Token", &self.service_token)
+            .json(payload)
+            .send()
+            .await
+            .map_err(|e| format!("runtime entrypoint ACK push failed: {e}"))?;
+
+        if response.status().is_success() {
+            return Ok(());
+        }
+
+        Err(format!(
+            "runtime entrypoint ACK push failed with HTTP {}",
+            response.status()
+        ))
+    }
+
     fn endpoint(&self, path: &str) -> String {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
     }
@@ -425,6 +454,29 @@ pub struct RouteActionAckPayload<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<&'a Value>,
     pub occurred_at: &'a str,
+}
+
+#[derive(Serialize)]
+pub struct RuntimeEntrypointAckPayload<'a> {
+    pub contract_version: &'static str,
+    pub ack_id: &'a str,
+    pub external_node_id: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entrypoint_id: Option<&'a str>,
+    pub runtime_id: &'a str,
+    pub runtime_kind: &'a str,
+    pub observed_host: &'a str,
+    pub observed_port: u16,
+    pub bind_scope: &'a str,
+    pub protocol: &'a str,
+    pub listen_ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_probe_ok: Option<bool>,
+    pub runtime_revision: &'a str,
+    pub sidecar_version: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence: Option<&'a Value>,
+    pub last_ack_at: &'a str,
 }
 
 #[derive(Clone)]

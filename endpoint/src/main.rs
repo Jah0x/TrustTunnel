@@ -5,12 +5,13 @@ use std::str::FromStr;
 use std::sync::Arc;
 use tokio::signal;
 use toml_edit::{Document, Item, Table};
+use trusttunnel::authentication::lk_signed::{SignedAccessAuthenticator, VerificationKey};
 use trusttunnel::authentication::registry_based::RegistryBasedAuthenticator;
 use trusttunnel::authentication::Authenticator;
 use trusttunnel::client_config;
 use trusttunnel::client_random_prefix::{self, GeneratorParams};
 use trusttunnel::core::Core;
-use trusttunnel::settings::Settings;
+use trusttunnel::settings::{LkSignedAuthMode, Settings};
 use trusttunnel::shutdown::Shutdown;
 use trusttunnel::{log_utils, settings};
 
@@ -73,6 +74,69 @@ fn increase_fd_limit() {
 
 #[cfg(not(unix))]
 fn increase_fd_limit() {}
+
+struct AnyAuthenticator {
+    authenticators: Vec<Arc<dyn Authenticator>>,
+}
+
+impl Authenticator for AnyAuthenticator {
+    fn authenticate(
+        &self,
+        source: &trusttunnel::authentication::Source<'_>,
+        log_id: &log_utils::IdChain<u64>,
+    ) -> trusttunnel::authentication::Status {
+        for authenticator in &self.authenticators {
+            if authenticator.authenticate(source, log_id)
+                == trusttunnel::authentication::Status::Pass
+            {
+                return trusttunnel::authentication::Status::Pass;
+            }
+        }
+        trusttunnel::authentication::Status::Reject
+    }
+}
+
+fn build_authenticator(settings: &Settings) -> Option<Arc<dyn Authenticator>> {
+    let registry: Option<Arc<dyn Authenticator>> = if !settings.get_clients().is_empty() {
+        Some(Arc::new(RegistryBasedAuthenticator::new(
+            settings.get_clients(),
+        )))
+    } else {
+        None
+    };
+
+    let signed_auth = settings.lk_signed_auth();
+    if !signed_auth.is_enabled() {
+        return registry;
+    }
+
+    let keys = signed_auth
+        .keys()
+        .iter()
+        .map(|key| VerificationKey {
+            key_id: key.key_id().to_string(),
+            secret: key.secret().as_bytes().to_vec(),
+        })
+        .collect();
+    let mut signed = SignedAccessAuthenticator::new(keys);
+    if let Some(scope) = signed_auth.required_scope() {
+        signed = signed.with_required_scope(scope.to_string());
+    }
+    let signed: Option<Arc<dyn Authenticator>> = Some(Arc::new(signed));
+
+    match signed_auth.mode() {
+        LkSignedAuthMode::RegistryOnly => registry,
+        LkSignedAuthMode::SignedOnly => signed,
+        LkSignedAuthMode::RegistryThenSigned => match (registry, signed) {
+            (Some(registry), Some(signed)) => Some(Arc::new(AnyAuthenticator {
+                authenticators: vec![registry, signed],
+            })),
+            (Some(registry), None) => Some(registry),
+            (None, Some(signed)) => Some(signed),
+            (None, None) => None,
+        },
+    }
+}
 
 fn main() {
     let args = clap::Command::new("VPN endpoint")
@@ -496,13 +560,7 @@ fn main() {
     };
 
     let shutdown = Shutdown::new();
-    let authenticator: Option<Arc<dyn Authenticator>> = if !settings.get_clients().is_empty() {
-        Some(Arc::new(RegistryBasedAuthenticator::new(
-            settings.get_clients(),
-        )))
-    } else {
-        None
-    };
+    let authenticator = build_authenticator(&settings);
     let core = Arc::new(
         Core::new(
             settings,

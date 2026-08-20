@@ -36,6 +36,8 @@ pub enum ValidationError {
     NoCredentialsOnPublicAddress,
     /// Invalid auth failure status code
     InvalidAuthFailureStatusCode(u16),
+    /// Invalid LK signed auth configuration
+    InvalidSignedAuth(String),
 }
 
 impl Debug for ValidationError {
@@ -59,6 +61,7 @@ impl Debug for ValidationError {
                 "Invalid auth_failure_status_code: {}. Supported values: 407, 405",
                 code
             ),
+            Self::InvalidSignedAuth(x) => write!(f, "Invalid lk_signed_auth settings: {}", x),
         }
     }
 }
@@ -161,6 +164,10 @@ pub struct Settings {
     #[serde(rename(deserialize = "credentials_file"))]
     #[serde(deserialize_with = "deserialize_clients")]
     pub(crate) clients: Vec<Client>,
+    /// LK-issued signed access authenticator settings.
+    #[serde(default)]
+    #[serde(skip_serializing)]
+    pub(crate) lk_signed_auth: LkSignedAuthSettings,
     /// The reverse proxy settings.
     /// With this one set up the endpoint does TLS termination on such connections and
     /// translates HTTP/x traffic into HTTP/1.1 protocol towards the server and back
@@ -224,6 +231,85 @@ pub struct Settings {
     /// https://github.com/serde-rs/serde/issues/642
     #[serde(skip)]
     built: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LkSignedAuthMode {
+    /// Use only the legacy static credentials registry.
+    RegistryOnly,
+    /// Use only LK-issued signed access tokens.
+    SignedOnly,
+    /// Try the legacy registry first, then LK-issued signed access tokens.
+    RegistryThenSigned,
+}
+
+impl Default for LkSignedAuthMode {
+    fn default() -> Self {
+        Self::RegistryThenSigned
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "rt_doc", derive(RuntimeDoc))]
+pub struct LkSignedAuthKey {
+    /// Key identifier used in the signed access token.
+    pub(crate) key_id: String,
+    /// Shared HMAC secret. Supply this from a mounted secret file, not a repository file.
+    pub(crate) secret: String,
+}
+
+impl LkSignedAuthKey {
+    pub fn key_id(&self) -> &str {
+        &self.key_id
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
+}
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "rt_doc", derive(RuntimeDoc))]
+pub struct LkSignedAuthSettings {
+    /// Enables LK-issued signed access token authentication.
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    /// Authentication mode used when both legacy registry credentials and signed auth exist.
+    #[serde(default)]
+    pub(crate) mode: LkSignedAuthMode,
+    /// Optional required token scope.
+    #[serde(default)]
+    pub(crate) required_scope: Option<String>,
+    /// Verification keyring.
+    #[serde(default)]
+    pub(crate) keys: Vec<LkSignedAuthKey>,
+}
+
+impl LkSignedAuthSettings {
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    pub fn mode(&self) -> LkSignedAuthMode {
+        self.mode
+    }
+
+    pub fn required_scope(&self) -> Option<&str> {
+        self.required_scope.as_deref()
+    }
+
+    pub fn keys(&self) -> &[LkSignedAuthKey] {
+        &self.keys
+    }
+
+    pub fn has_verification_key(&self) -> bool {
+        self.enabled
+            && self
+                .keys
+                .iter()
+                .any(|key| !key.key_id.trim().is_empty() && !key.secret.is_empty())
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -510,6 +596,10 @@ impl Settings {
         SettingsBuilder::new()
     }
 
+    pub fn lk_signed_auth(&self) -> &LkSignedAuthSettings {
+        &self.lk_signed_auth
+    }
+
     pub(crate) fn is_built(&self) -> bool {
         self.built
     }
@@ -535,8 +625,29 @@ impl Settings {
             return Err(ValidationError::ListenProtocols("Not set".into()));
         }
 
+        if self.lk_signed_auth.enabled {
+            if self.lk_signed_auth.keys.is_empty() {
+                return Err(ValidationError::InvalidSignedAuth(
+                    "enabled auth requires at least one verification key".into(),
+                ));
+            }
+            if self
+                .lk_signed_auth
+                .keys
+                .iter()
+                .any(|key| key.key_id.trim().is_empty() || key.secret.is_empty())
+            {
+                return Err(ValidationError::InvalidSignedAuth(
+                    "verification keys must have non-empty key_id and secret".into(),
+                ));
+            }
+        }
+
         // Do not start the endpoint without credentials on a public address
-        if self.clients.is_empty() && !self.listen_address.ip().is_loopback() {
+        if self.clients.is_empty()
+            && !self.lk_signed_auth.has_verification_key()
+            && !self.listen_address.ip().is_loopback()
+        {
             return Err(ValidationError::NoCredentialsOnPublicAddress);
         }
 
@@ -640,6 +751,7 @@ impl Default for Settings {
             udp_connections_timeout: Settings::default_udp_connections_timeout(),
             forward_protocol: Default::default(),
             clients: Default::default(),
+            lk_signed_auth: Default::default(),
             listen_protocols: ListenProtocolSettings {
                 http1: Some(Http1Settings::builder().build()),
                 http2: Some(Http2Settings::builder().build()),
@@ -905,6 +1017,7 @@ impl SettingsBuilder {
                 forward_protocol: Default::default(),
                 listen_protocols: Default::default(),
                 clients: Default::default(),
+                lk_signed_auth: Default::default(),
                 reverse_proxy: None,
                 icmp: None,
                 metrics: Default::default(),
@@ -1010,6 +1123,12 @@ impl SettingsBuilder {
     /// Set the client authenticator
     pub fn clients(mut self, x: Vec<Client>) -> Self {
         self.settings.clients = x;
+        self
+    }
+
+    /// Set LK-issued signed access authenticator settings
+    pub fn lk_signed_auth(mut self, x: LkSignedAuthSettings) -> Self {
+        self.settings.lk_signed_auth = x;
         self
     }
 
@@ -1674,10 +1793,53 @@ fn demangle_toml_string(x: String) -> String {
 mod tests {
     use super::*;
 
+    fn signed_auth_settings() -> LkSignedAuthSettings {
+        LkSignedAuthSettings {
+            enabled: true,
+            mode: LkSignedAuthMode::SignedOnly,
+            required_scope: Some("trusttunnel:connect".into()),
+            keys: vec![LkSignedAuthKey {
+                key_id: "lk-key-a".into(),
+                secret: "test-secret".into(),
+            }],
+        }
+    }
+
     #[test]
     fn default_auth_failure_status_code_is_407() {
         let settings = Settings::default();
         assert_eq!(settings.auth_failure_status_code, 407);
+    }
+
+    #[test]
+    fn lk_signed_auth_is_disabled_by_default() {
+        let settings = Settings::default();
+        assert!(!settings.lk_signed_auth().is_enabled());
+        assert!(settings.lk_signed_auth().keys().is_empty());
+    }
+
+    #[test]
+    fn lk_signed_auth_allows_public_listener_without_static_clients() {
+        let mut settings = Settings::default();
+        settings.listen_address = (Ipv4Addr::UNSPECIFIED, 8443).into();
+        settings.lk_signed_auth = signed_auth_settings();
+
+        assert!(settings.validate().is_ok());
+    }
+
+    #[test]
+    fn lk_signed_auth_enabled_requires_keyring() {
+        let mut settings = Settings::default();
+        settings.listen_address = (Ipv4Addr::UNSPECIFIED, 8443).into();
+        settings.lk_signed_auth = LkSignedAuthSettings {
+            enabled: true,
+            mode: LkSignedAuthMode::SignedOnly,
+            required_scope: None,
+            keys: vec![],
+        };
+
+        let err = settings.validate().unwrap_err();
+        assert!(matches!(err, ValidationError::InvalidSignedAuth(_)));
     }
 
     #[test]

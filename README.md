@@ -584,8 +584,22 @@ Optional:
 - `TRUSTTUNNEL_ROUTE_ACTION_POLL_INTERVAL_SEC` (default `5`)
 - `TRUSTTUNNEL_ROUTE_ACTION_STATE_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/route_action_state.json`)
 - `TRUSTTUNNEL_ROUTE_ACTION_ACK_OUTBOX_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/pending_route_action_acks.jsonl`)
+- `TRUSTTUNNEL_ROUTE_ACTION_DRAIN_MARKER_FILE` (default `<TRUSTTUNNEL_RUNTIME_DIR>/route_action_drain_marker.json`)
+- `TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD` (optional shell command run for `apply_drain`; only successful hooks are ACKed as `applied`)
 - `LK_ROUTE_ACTION_COMMANDS_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/route-actions/commands`)
 - `LK_ROUTE_ACTION_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/route-actions/acks`)
+- `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_ENABLED` (default `false`; sends LK proof that the advertised entrypoint is covered by the runtime bind and local TCP probe)
+- `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_INTERVAL_SEC` (default `30`)
+- `TRUSTTUNNEL_RUNTIME_ENTRYPOINT_ACK_PROBE_TIMEOUT_SEC` (default `2`)
+- `TRUSTTUNNEL_ENTRYPOINT_ID` (optional stable LK entrypoint id)
+- `LK_RUNTIME_ENTRYPOINT_ACK_PATH` (default `/internal/trusttunnel/v1/nodes/runtime-entrypoint-acks`)
+- `TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_ENABLED` (default `false`; enables LK access-pair target lease polling and ACK delivery)
+- `TRUSTTUNNEL_ACCESS_PAIR_TARGET_SYNC_INTERVAL_SEC` (default `10`)
+- `TRUSTTUNNEL_ACCESS_PAIR_TARGET_LEASE_SEC` (default `120`, max `600`)
+- `TRUSTTUNNEL_ACCESS_PAIR_TARGET_RUNTIME_ID` (optional runtime lease owner; falls back to `TRUSTTUNNEL_RUNTIME_ID` then `NODE_EXTERNAL_ID`)
+- `TRUSTTUNNEL_ACCESS_PAIR_SECRETS_FILE` (optional local `[[client]]` secret source for legacy registry credential targets)
+- `LK_ACCESS_PAIR_TARGETS_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/access-pair-targets`)
+- `LK_ACCESS_PAIR_TARGET_ACK_PATH_TEMPLATE` (default `/internal/trusttunnel/v1/nodes/{externalNodeId}/access-pair-targets/ack`)
 - `TRUSTTUNNEL_ENDPOINT_METRICS_URL` (optional override for scraping endpoint Prometheus metrics; otherwise derived from `[metrics].address` in `vpn.toml`)
 - `AGENT_SPEEDTEST_ENABLED` (default `false`; enables periodic sidecar speedtest probes)
 - `AGENT_SPEEDTEST_INTERVAL_SEC` (default `300`)
@@ -643,7 +657,7 @@ Classic agent runtime credentials migration and restart recovery:
 - After the first successful apply, the agent creates `.runtime_credentials_primary` in `TRUSTTUNNEL_RUNTIME_DIR` and treats runtime credentials as the source of truth.
 - After this marker exists, restarts do not re-import credentials from bootstrap source.
 - If runtime credentials are lost after migration, bootstrap source is not reused; next successful reconcile reconstructs credentials from current desired state.
-- When `TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED=true`, the sidecar polls LK for `route_action_command.v1` commands, supports only `observe_noop`, persists processed command ids in `route_action_state.json`, and stores `route_action_ack.v1` ACKs in `pending_route_action_acks.jsonl` until LK accepts them.
+- When `TRUSTTUNNEL_ROUTE_ACTIONS_ENABLED=true`, the sidecar polls LK for `route_action_command.v1` commands, supports `observe_noop` and `apply_drain`, persists processed command ids in `route_action_state.json`, and stores `route_action_ack.v1` ACKs in `pending_route_action_acks.jsonl` until LK accepts them. `apply_drain` is reported as `applied` only when `TRUSTTUNNEL_ROUTE_ACTION_DRAIN_CMD` is configured and exits successfully; without that hook it is reported as `skipped` with `drain_hook_not_configured`.
 
 Classic agent architecture boundaries:
 

@@ -1,3 +1,4 @@
+pub mod lk_signed;
 pub mod registry_based;
 
 use crate::log_utils;
