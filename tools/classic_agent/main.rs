@@ -3216,11 +3216,10 @@ impl Agent {
             target_state: outcome.target_state.to_string(),
             sync_status: outcome.sync_status.to_string(),
             auth_mode: target.auth_mode.clone(),
-            runtime_revision: self
-                .state
-                .applied_revision
-                .clone()
-                .unwrap_or_else(|| self.state.credentials_sha256.clone()),
+            runtime_revision: normalize_access_pair_runtime_revision(
+                self.state.applied_revision.as_deref(),
+                &self.state.credentials_sha256,
+            ),
             sidecar_version: self.cfg.agent_version.clone(),
             last_error,
             metadata: serde_json::json!({
@@ -3241,7 +3240,8 @@ impl Agent {
             .send()
             .await
             .map_err(|e| format!("access pair target ACK failed: {e}"))?;
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() {
             println!(
                 "phase=access_pair_target_ack_accepted node={} target_id={} pair_id={} username={} sync_status={} target_state={} materializer={}",
                 self.cfg.node_external_id,
@@ -3254,10 +3254,21 @@ impl Agent {
             );
             return Ok(());
         }
+        let response_body = response
+            .text()
+            .await
+            .unwrap_or_default()
+            .chars()
+            .take(1024)
+            .collect::<String>();
+        let detail = if response_body.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" body={}", response_body.trim())
+        };
         Err(format!(
-            "access pair target ACK returned HTTP {} for target_id={}",
-            response.status(),
-            target.target_id
+            "access pair target ACK returned HTTP {} for target_id={}{}",
+            status, target.target_id, detail
         ))
     }
 
@@ -5455,6 +5466,21 @@ fn normalize_required_string(value: &str, fallback: &str) -> String {
     normalized.to_string()
 }
 
+fn normalize_access_pair_runtime_revision(
+    applied_revision: Option<&str>,
+    credentials_sha256: &str,
+) -> String {
+    applied_revision
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            let value = credentials_sha256.trim();
+            (!value.is_empty()).then_some(value)
+        })
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 fn normalize_health_status(raw_status: &str, runtime_mode: RuntimeMode) -> &'static str {
     let status = raw_status.trim().to_ascii_lowercase();
     match runtime_mode {
@@ -7622,6 +7648,22 @@ fn compact_http_response_body(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_pair_ack_runtime_revision_is_never_empty() {
+        assert_eq!(
+            normalize_access_pair_runtime_revision(Some(" rev-7 "), "sha-1"),
+            "rev-7"
+        );
+        assert_eq!(
+            normalize_access_pair_runtime_revision(None, " sha-1 "),
+            "sha-1"
+        );
+        assert_eq!(
+            normalize_access_pair_runtime_revision(Some("  "), "  "),
+            "unknown"
+        );
+    }
     #[cfg(feature = "legacy-lk-http")]
     use http_body_util::{BodyExt, Full};
     #[cfg(feature = "legacy-lk-http")]
