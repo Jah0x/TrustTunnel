@@ -228,10 +228,10 @@ For `auth_mode=lk_signed`, the agent ACKs `applied` only when `vpn.toml`
 contains enabled `lk_signed_auth` with at least one verification key. For
 legacy registry credentials, the agent applies the target through the existing
 candidate credentials validation, atomic promote, apply hook, post-apply verify,
-and rollback pipeline using `TRUSTTUNNEL_ACCESS_PAIR_SECRETS_FILE` or existing
-runtime credentials as the local secret source. Missing local secrets are ACKed
-as `sync_status=error` with `local_access_pair_secret_missing`; they are never
-reported as applied.
+and rollback pipeline using the secret embedded in the LK target response,
+`TRUSTTUNNEL_ACCESS_PAIR_SECRETS_FILE`, or existing runtime credentials as the
+local secret source. Missing local secrets are ACKed as `sync_status=error` with
+`local_access_pair_secret_missing`; they are never reported as applied.
 
 Legacy TT-link env fallback (used only when link config file cannot be loaded):
 

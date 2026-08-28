@@ -1255,6 +1255,8 @@ struct AccessPairTarget {
     target_id: u64,
     pair_id: String,
     username: String,
+    #[serde(default)]
+    password: Option<String>,
     target_state: String,
     sync_status: String,
     auth_mode: String,
@@ -2997,7 +2999,7 @@ impl Agent {
         } else if target.auth_mode == "lk_signed" {
             self.ensure_lk_signed_access_ready(&target).await
         } else {
-            let secret = self.lookup_access_pair_secret(&target.username).await?;
+            let secret = self.resolve_access_pair_secret(&target).await?;
             self.apply_registry_access_pair_target(&target, secret)
                 .await
         };
@@ -3115,6 +3117,25 @@ impl Agent {
         }
 
         Ok(None)
+    }
+
+    async fn resolve_access_pair_secret(
+        &self,
+        target: &AccessPairTarget,
+    ) -> Result<Option<sidecar_sync::AccessArtifact>, String> {
+        if let Some(password) = target
+            .password
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(sidecar_sync::AccessArtifact {
+                username: target.username.clone(),
+                password: password.to_string(),
+            }));
+        }
+
+        self.lookup_access_pair_secret(&target.username).await
     }
 
     async fn apply_registry_access_pair_target(
@@ -7905,21 +7926,30 @@ mod tests {
 
     #[cfg(feature = "legacy-lk-http")]
     fn access_pair_targets_json(auth_mode: &str) -> String {
+        access_pair_targets_json_with_password(auth_mode, None)
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    fn access_pair_targets_json_with_password(auth_mode: &str, password: Option<&str>) -> String {
+        let mut target = serde_json::json!({
+            "target_id": 101,
+            "pair_id": "tt-pair-101",
+            "username": "access-101",
+            "target_state": "desired",
+            "sync_status": "syncing",
+            "auth_mode": auth_mode,
+            "lease_id": "lease-101",
+            "desired_revision": 7,
+            "applied_revision": 0,
+            "idempotency_key": "target-101-rev-7"
+        });
+        if let Some(password) = password {
+            target["password"] = serde_json::Value::String(password.to_string());
+        }
         serde_json::json!({
             "contract_version": "access_pair_targets.v1",
             "external_node_id": "node-1",
-            "targets": [{
-                "target_id": 101,
-                "pair_id": "tt-pair-101",
-                "username": "access-101",
-                "target_state": "desired",
-                "sync_status": "syncing",
-                "auth_mode": auth_mode,
-                "lease_id": "lease-101",
-                "desired_revision": 7,
-                "applied_revision": 0,
-                "idempotency_key": "target-101-rev-7"
-            }]
+            "targets": [target]
         })
         .to_string()
     }
@@ -9216,6 +9246,59 @@ secret = "test-secret"
             .as_str()
             .unwrap()
             .contains("local_access_pair_secret_missing"));
+    }
+
+    #[cfg(feature = "legacy-lk-http")]
+    #[tokio::test]
+    async fn access_pair_target_sync_applies_registry_secret_from_lk_response() {
+        let server = MockHttpServer::start().await;
+        let tmp_dir = TempDir::new().unwrap();
+        let mut agent = make_agent(&tmp_dir, &server.base_url, None).await;
+        server
+            .enqueue(
+                Method::GET,
+                "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets",
+                HyperStatusCode::OK,
+                access_pair_targets_json_with_password("registry_credentials", Some("pair-secret")),
+            )
+            .await;
+        server
+            .enqueue(
+                Method::POST,
+                "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets/ack",
+                HyperStatusCode::OK,
+                "{}",
+            )
+            .await;
+
+        agent.access_pair_target_sync_tick().await;
+
+        let requests = server.captured().await;
+        let ack = requests
+            .iter()
+            .find(|request| {
+                request.method == Method::POST
+                    && request.path
+                        == "/internal/trusttunnel/v1/nodes/node-1/access-pair-targets/ack"
+            })
+            .map(|request| serde_json::from_str::<serde_json::Value>(&request.body).unwrap())
+            .unwrap();
+        assert_eq!(ack["sync_status"], "applied");
+        assert_eq!(ack["target_state"], "applied");
+        assert_eq!(ack["metadata"]["materializer"], "registry_credentials");
+        assert!(ack.get("last_error").is_none());
+
+        let raw = fs::read_to_string(&agent.cfg.runtime_credentials_path)
+            .await
+            .unwrap();
+        let artifacts = parse_access_artifacts(&raw).unwrap();
+        assert_eq!(
+            artifacts,
+            vec![sidecar_sync::AccessArtifact {
+                username: "access-101".to_string(),
+                password: "pair-secret".to_string(),
+            }]
+        );
     }
 
     #[cfg(feature = "legacy-lk-http")]
