@@ -29,6 +29,13 @@
 - [Fix] `classic_agent` now supports one-time bootstrap import from `TRUSTTUNNEL_BOOTSTRAP_CREDENTIALS_FILE` into `TRUSTTUNNEL_RUNTIME_DIR/<TRUSTTUNNEL_CREDENTIALS_FILE>`, then marks runtime credentials as primary after the first successful sync/apply and stops treating bootstrap storage as primary on restart.
 
 - [Fix] `classic_agent` now persists failed `sync-report` deliveries in `pending_sync_reports.jsonl` under `TRUSTTUNNEL_RUNTIME_DIR` and retries them with backoff until they are delivered.
+- [Feature] Optional per-user metrics behind the `per_client_metrics` metrics
+  config flag (default `false`). When enabled, `/metrics` additionally exposes
+  `client_sessions_per_user`, `inbound_traffic_bytes_per_user`, and
+  `outbound_traffic_bytes_per_user` labelled with the authenticated `username`,
+  and a new `/clients` JSON endpoint reports per-user aggregates (sessions,
+  traffic, IP). Aggregate metrics are unchanged. Exposes usernames and client
+  IPs, so only enable it on a protected metrics listener.
 
 - [Fix] Docker endpoint image now provides `/usr/local/bin/trusttunnel-endpoint` as a compatibility path for orchestrators that start the endpoint via a hyphenated binary name.
 

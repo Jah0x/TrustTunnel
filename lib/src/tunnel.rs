@@ -16,6 +16,15 @@ use std::io;
 use std::io::ErrorKind;
 use std::sync::{Arc, Mutex};
 
+/// Extract the username from base64-encoded `username:password` credentials.
+fn decode_username(creds: &str) -> Option<String> {
+    BASE64_ENGINE
+        .decode(creds)
+        .ok()
+        .and_then(|v| String::from_utf8(v).ok())
+        .and_then(|s| s.split(':').next().map(|x| x.to_string()))
+}
+
 #[derive(Clone)]
 pub(crate) enum AuthenticationPolicy<'this> {
     /// Perform the regular authentication procedure through the configured authenticator
@@ -195,11 +204,11 @@ impl Tunnel {
 
                 let request_id = request.id();
                 log_id!(trace, request_id, "Processing tunnel request");
-                let auth_info = request
+                let auth_info_result = request
                     .auth_info()
                     .map(|x| x.map(authentication::Source::into_owned));
                 let forwarder_auth = match (
-                    auth_info,
+                    auth_info_result.as_ref().cloned(),
                     authentication_policy,
                     context.authenticator.clone(),
                 ) {
@@ -231,7 +240,10 @@ impl Tunnel {
                     }
                     (Err(e), ..) => {
                         log_id!(debug, request_id, "Failed to get auth info: {}", e);
-                        request.fail_request(ConnectionError::Io(e));
+                        request.fail_request(ConnectionError::Io(io::Error::new(
+                            e.kind(),
+                            e.to_string(),
+                        )));
                         return;
                     }
                 };
@@ -241,6 +253,22 @@ impl Tunnel {
                     request_id,
                     "Authentication complete, promoting request"
                 );
+
+                // If this request carried credentials, relabel the session
+                // with the authenticated username (no-op if it's already labelled).
+                if let Ok(Some(source)) = auth_info_result {
+                    let username_opt = match &source {
+                        authentication::Source::ProxyBasic(s) => decode_username(s.as_ref()),
+                        authentication::Source::Sni(s) => decode_username(s.as_ref()),
+                    };
+                    if let Some(u) = username_opt {
+                        context.metrics.transfer_session_username(
+                            protocol,
+                            &log_id.to_string(),
+                            Some(u),
+                        );
+                    }
+                }
                 match request.promote_to_next_state() {
                     Ok(None) => {
                         log_id!(trace, request_id, "Health check request completed");
@@ -393,13 +421,13 @@ impl Tunnel {
             let client_ip = client_ip.clone();
             move |direction, n| match direction {
                 pipe::SimplexDirection::Incoming => {
-                    metrics.add_inbound_bytes(protocol, n);
+                    metrics.add_inbound_bytes(protocol, username.as_deref(), n);
                     if let Some(username) = username.as_deref() {
                         metrics.add_account_inbound_bytes(username, protocol, &client_ip, n);
                     }
                 }
                 pipe::SimplexDirection::Outgoing => {
-                    metrics.add_outbound_bytes(protocol, n);
+                    metrics.add_outbound_bytes(protocol, username.as_deref(), n);
                     if let Some(username) = username.as_deref() {
                         metrics.add_account_outbound_bytes(username, protocol, &client_ip, n);
                     }
@@ -487,13 +515,13 @@ impl Tunnel {
             let client_ip = client_ip.clone();
             move |direction, n| match direction {
                 pipe::SimplexDirection::Incoming => {
-                    metrics.add_inbound_bytes(protocol, n);
+                    metrics.add_inbound_bytes(protocol, username.as_deref(), n);
                     if let Some(username) = username.as_deref() {
                         metrics.add_account_inbound_bytes(username, protocol, &client_ip, n);
                     }
                 }
                 pipe::SimplexDirection::Outgoing => {
-                    metrics.add_outbound_bytes(protocol, n);
+                    metrics.add_outbound_bytes(protocol, username.as_deref(), n);
                     if let Some(username) = username.as_deref() {
                         metrics.add_account_outbound_bytes(username, protocol, &client_ip, n);
                     }
