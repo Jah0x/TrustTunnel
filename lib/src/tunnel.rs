@@ -106,24 +106,6 @@ impl Tunnel {
         }
     }
 
-    fn resolve_username(
-        &self,
-        request: &dyn downstream::PendingMultiplexedRequest,
-    ) -> Option<String> {
-        match &self.authentication_policy {
-            AuthenticationPolicy::Authenticated(source) => {
-                self.context.authenticator.as_ref()?.username(source)
-            }
-            AuthenticationPolicy::Default => match request.auth_info() {
-                Ok(Some(source)) => match &source {
-                    authentication::Source::ProxyBasic(s) => decode_username(s.as_ref()),
-                    authentication::Source::Sni(s) => decode_username(s.as_ref()),
-                },
-                _ => None,
-            },
-        }
-    }
-
     async fn listen_inner(&mut self) -> io::Result<()> {
         loop {
             log_id!(trace, self.id, "Tunnel waiting for request");
