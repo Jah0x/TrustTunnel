@@ -20,10 +20,11 @@
 > export/write runs only on bootstrap, on changed reconcile plans, or on
 > explicit operator-forced regeneration.
 >
-> SecureSoft LK treats classic TT and Happ/Xray as two logical protocols that may
-> share one physical endpoint. This repository owns the classic TT `tt://` export;
-> LK pairs any Happ/Xray side by physical `endpoint_ip` and keeps it out of
-> Windows/Android bootstrap.
+> TrustTunnel is the active SecureSoft customer protocol. This repository owns
+> classic `tt://` export. LK allocates two TrustTunnel routes per active
+> subscription; Windows/Android receive them through bootstrap and iOS receives
+> the same routes in a Clash Mi subscription. Happ/Xray is legacy and is not a
+> required peer for normal new allocation.
 
 ---
 
